@@ -1,0 +1,48 @@
+{
+  "name": "ops-shared",
+  "version": "1.0.0",
+  "description": "Shared code for AgentOps (types, events, base classes)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types/index.d.ts",
+      "default": "./dist/types/index.js"
+    },
+    "./base/BaseAgent": {
+      "types": "./dist/base/BaseAgent.d.ts",
+      "default": "./dist/base/BaseAgent.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    },
+    "./events/types": {
+      "types": "./dist/events/types.d.ts",
+      "default": "./dist/events/types.js"
+    },
+    "./events": {
+      "types": "./dist/events/index.d.ts",
+      "default": "./dist/events/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^0.0.54",
+    "ai": "^3.1.0",
+    "dotenv": "^16.4.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "typescript": "^5.3.3"
+  }
+}

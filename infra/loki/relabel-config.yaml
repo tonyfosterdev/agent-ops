@@ -1,0 +1,6 @@
+- source_labels: [compose_service]
+  target_label: service
+- source_labels: [compose_project]
+  target_label: project
+- action: labeldrop
+  regex: compose_(.*)

@@ -1,0 +1,32 @@
+{
+  "name": "ops-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AgentOps monorepo - CLI and server for autonomous agents",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:shared": "npm run build -w ops-shared",
+    "build:server": "npm run build -w agent-server",
+    "build:cli": "npm run build -w ops-cli",
+    "dev:server": "npm run dev -w agent-server",
+    "dev:cli": "npm run dev -w ops-cli",
+    "clean": "rm -rf packages/*/dist packages/*/node_modules node_modules"
+  },
+  "keywords": [
+    "agent",
+    "ai",
+    "debugging",
+    "autonomous"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "warehouse-api",
+  "version": "1.0.0",
+  "description": "Warehouse API for Agentic Store Ops",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "nodemon",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "migration:generate": "typeorm migration:generate -d src/database.ts",
+    "migration:run": "typeorm migration:run -d src/database.ts",
+    "migration:revert": "typeorm migration:revert -d src/database.ts",
+    "seed": "ts-node src/seed.ts"
+  },
+  "dependencies": {
+    "@agentops/shared": "file:../../shared",
+    "@koa/cors": "^5.0.0",
+    "axios": "^1.6.5",
+    "bcrypt": "^5.1.1",
+    "dotenv": "^16.4.5",
+    "koa": "^2.15.0",
+    "koa-bodyparser": "^4.4.1",
+    "koa-logger": "^3.2.1",
+    "koa-router": "^12.0.1",
+    "pg": "^8.11.3",
+    "pino": "^10.1.0",
+    "pino-pretty": "^13.1.2",
+    "typeorm": "^0.3.20"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/koa": "^2.14.0",
+    "@types/koa__cors": "^5.0.0",
+    "@types/koa-bodyparser": "^4.3.12",
+    "@types/koa-logger": "^3.1.5",
+    "@types/koa-router": "^7.4.8",
+    "@types/node": "^20.11.0",
+    "nodemon": "^3.0.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

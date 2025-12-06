@@ -1,0 +1,337 @@
+networks:
+  agentops-network:
+    driver: bridge
+
+services:
+  # Traefik Reverse Proxy
+  traefik:
+    image: traefik:v2.11
+    container_name: traefik
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    ports:
+      - "80:80"
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+    networks:
+      - agentops-network
+    restart: unless-stopped
+
+  # Store PostgreSQL Database
+  store-db:
+    image: postgres:16-alpine
+    container_name: store-db
+    environment:
+      POSTGRES_USER: ${STORE_DB_USERNAME:-storeuser}
+      POSTGRES_PASSWORD: ${STORE_DB_PASSWORD}
+      POSTGRES_DB: ${STORE_DB_DATABASE:-store_db}
+    volumes:
+      - store-db-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-store.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - agentops-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U storeuser -d store_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Warehouse Alpha PostgreSQL Database
+  warehouse-alpha-db:
+    image: postgres:16-alpine
+    container_name: warehouse-alpha-db
+    environment:
+      POSTGRES_USER: ${WAREHOUSE_DB_USERNAME:-warehouseuser}
+      POSTGRES_PASSWORD: ${WAREHOUSE_DB_PASSWORD}
+      POSTGRES_DB: ${WAREHOUSE_ALPHA_DB_DATABASE:-warehouse_alpha_db}
+    volumes:
+      - warehouse-alpha-db-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-warehouse-alpha.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5433:5432"
+    networks:
+      - agentops-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warehouseuser -d warehouse_alpha_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Warehouse Beta PostgreSQL Database
+  warehouse-beta-db:
+    image: postgres:16-alpine
+    container_name: warehouse-beta-db
+    environment:
+      POSTGRES_USER: ${WAREHOUSE_DB_USERNAME:-warehouseuser}
+      POSTGRES_PASSWORD: ${WAREHOUSE_DB_PASSWORD}
+      POSTGRES_DB: ${WAREHOUSE_BETA_DB_DATABASE:-warehouse_beta_db}
+    volumes:
+      - warehouse-beta-db-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-warehouse-beta.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5434:5432"
+    networks:
+      - agentops-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warehouseuser -d warehouse_beta_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Store API Service
+  store-api:
+    build:
+      context: .
+      dockerfile: services/store-api/Dockerfile
+    container_name: store-api
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      DB_HOST: store-db
+      DB_PORT: 5432
+      DB_USERNAME: ${STORE_DB_USERNAME:-storeuser}
+      DB_PASSWORD: ${STORE_DB_PASSWORD}
+      DB_DATABASE: ${STORE_DB_DATABASE:-store_db}
+      SERVICE_SECRET: ${SERVICE_SECRET}
+      HEALTH_CHECK_INTERVAL_SECONDS: 60
+      INVENTORY_RECONCILIATION_INTERVAL_SECONDS: 300
+    # volumes:
+    #   - ./services/store-api/src:/app/src
+    #   - /app/node_modules
+    depends_on:
+      store-db:
+        condition: service_healthy
+      loki:
+        condition: service_started
+    networks:
+      - agentops-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.store-api.rule=Host(`api.localhost`) && PathPrefix(`/store`)"
+      - "traefik.http.routers.store-api.entrypoints=web"
+      - "traefik.http.middlewares.store-strip.stripprefix.prefixes=/store"
+      - "traefik.http.routers.store-api.middlewares=store-strip"
+      - "traefik.http.services.store-api.loadbalancer.server.port=3000"
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-batch-size: "400"
+        loki-retries: "2"
+        loki-max-backoff: "1s"
+        loki-external-labels: "service={{.Name}},project=agentops,container={{.ID}}"
+        no-file: "false"
+    restart: unless-stopped
+
+  # Warehouse Alpha Service
+  warehouse-alpha:
+    build:
+      context: .
+      dockerfile: services/warehouse-api/Dockerfile
+    container_name: warehouse-alpha
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      WAREHOUSE_NAME: warehouse-alpha
+      WAREHOUSE_URL: http://api.localhost/warehouses/alpha
+      WAREHOUSE_INTERNAL_URL: http://warehouse-alpha:3000
+      DB_HOST: warehouse-alpha-db
+      DB_PORT: 5432
+      DB_USERNAME: ${WAREHOUSE_DB_USERNAME:-warehouseuser}
+      DB_PASSWORD: ${WAREHOUSE_DB_PASSWORD}
+      DB_DATABASE: ${WAREHOUSE_ALPHA_DB_DATABASE:-warehouse_alpha_db}
+      STORE_API_URL: http://store-api:3000
+      SERVICE_SECRET: ${SERVICE_SECRET}
+      REGISTRATION_RETRY_INTERVAL_SECONDS: 5
+      REGISTRATION_MAX_RETRIES: 10
+    # volumes:
+    #   - ./services/warehouse-api/src:/app/src
+    #   - /app/node_modules
+    depends_on:
+      warehouse-alpha-db:
+        condition: service_healthy
+      store-api:
+        condition: service_started
+      loki:
+        condition: service_started
+    networks:
+      - agentops-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.warehouse-alpha.rule=Host(`api.localhost`) && PathPrefix(`/warehouses/alpha`)"
+      - "traefik.http.routers.warehouse-alpha.entrypoints=web"
+      - "traefik.http.middlewares.alpha-strip.stripprefix.prefixes=/warehouses/alpha"
+      - "traefik.http.routers.warehouse-alpha.middlewares=alpha-strip"
+      - "traefik.http.services.warehouse-alpha.loadbalancer.server.port=3000"
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-batch-size: "400"
+        loki-retries: "2"
+        loki-max-backoff: "1s"
+        loki-external-labels: "service={{.Name}},project=agentops,container={{.ID}}"
+        no-file: "false"
+    restart: unless-stopped
+
+  # Warehouse Beta Service
+  warehouse-beta:
+    build:
+      context: .
+      dockerfile: services/warehouse-api/Dockerfile
+    container_name: warehouse-beta
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      WAREHOUSE_NAME: warehouse-beta
+      WAREHOUSE_URL: http://api.localhost/warehouses/beta
+      WAREHOUSE_INTERNAL_URL: http://warehouse-beta:3000
+      DB_HOST: warehouse-beta-db
+      DB_PORT: 5432
+      DB_USERNAME: ${WAREHOUSE_DB_USERNAME:-warehouseuser}
+      DB_PASSWORD: ${WAREHOUSE_DB_PASSWORD}
+      DB_DATABASE: ${WAREHOUSE_BETA_DB_DATABASE:-warehouse_beta_db}
+      STORE_API_URL: http://store-api:3000
+      SERVICE_SECRET: ${SERVICE_SECRET}
+      REGISTRATION_RETRY_INTERVAL_SECONDS: 5
+      REGISTRATION_MAX_RETRIES: 10
+    # volumes:
+    #   - ./services/warehouse-api/src:/app/src
+    #   - /app/node_modules
+    depends_on:
+      warehouse-beta-db:
+        condition: service_healthy
+      store-api:
+        condition: service_started
+      loki:
+        condition: service_started
+    networks:
+      - agentops-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.warehouse-beta.rule=Host(`api.localhost`) && PathPrefix(`/warehouses/beta`)"
+      - "traefik.http.routers.warehouse-beta.entrypoints=web"
+      - "traefik.http.middlewares.beta-strip.stripprefix.prefixes=/warehouses/beta"
+      - "traefik.http.routers.warehouse-beta.middlewares=beta-strip"
+      - "traefik.http.services.warehouse-beta.loadbalancer.server.port=3000"
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+        loki-batch-size: "400"
+        loki-retries: "2"
+        loki-max-backoff: "1s"
+        loki-external-labels: "service={{.Name}},project=agentops,container={{.ID}}"
+        no-file: "false"
+    restart: unless-stopped
+
+  # Bookstore UI Service
+  bookstore-ui:
+    build: ./services/bookstore-ui
+    container_name: bookstore-ui
+    networks:
+      - agentops-network
+    environment:
+      - VITE_STORE_API_URL=http://store-api:3000
+      - VITE_WAREHOUSE_ALPHA_URL=http://warehouse-alpha:3000
+      - VITE_WAREHOUSE_BETA_URL=http://warehouse-beta:3000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ui.rule=Host(`localhost`)"
+      - "traefik.http.routers.ui.entrypoints=web"
+      - "traefik.http.services.ui.loadbalancer.server.port=80"
+    depends_on:
+      - store-api
+      - warehouse-alpha
+      - warehouse-beta
+    restart: unless-stopped
+
+  # Loki - Log Aggregation
+  loki:
+    image: grafana/loki:2.9.3
+    container_name: loki
+    user: "0"
+    ports:
+      - "3100:3100"  # Expose for Docker logging driver (runs on host)
+    volumes:
+      - ./infra/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/tmp/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - agentops-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.loki.rule=Host(`loki.localhost`)"
+      - "traefik.http.routers.loki.entrypoints=web"
+      - "traefik.http.services.loki.loadbalancer.server.port=3100"
+    restart: unless-stopped
+
+  # Grafana - Observability Dashboard
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://grafana.localhost
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    networks:
+      - agentops-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.localhost`)"
+      - "traefik.http.routers.grafana.entrypoints=web"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  # Agent Server
+  agent-server:
+    build:
+      context: ./ops
+      dockerfile: packages/agent-server/Dockerfile
+    container_name: agent-server
+    env_file:
+      - ./ops/packages/agent-server/.env
+    environment:
+      PORT: 3200
+      NODE_ENV: production
+      AUTH_USERNAME: ${AGENT_SERVER_USERNAME:-admin}
+      AUTH_PASSWORD: ${AGENT_SERVER_PASSWORD}
+      WORK_DIR: /workspace
+      LOG_LEVEL: info
+      LOKI_URL: http://loki:3100
+    ports:
+      - "3200:3200"
+    volumes:
+      - .:/workspace:rw
+    networks:
+      - agentops-network
+    depends_on:
+      - loki
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.agent-server.rule=Host(`api.localhost`) && PathPrefix(`/agents`)"
+      - "traefik.http.routers.agent-server.entrypoints=web"
+      - "traefik.http.services.agent-server.loadbalancer.server.port=3200"
+    restart: unless-stopped
+
+volumes:
+  store-db-data:
+  warehouse-alpha-db-data:
+  warehouse-beta-db-data:
+  loki-data:
+  grafana-data:
