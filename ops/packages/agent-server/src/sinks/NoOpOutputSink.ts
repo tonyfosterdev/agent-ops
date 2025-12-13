@@ -8,6 +8,10 @@ export class NoOpOutputSink implements OutputSink {
   async writeRunStarted(): Promise<void> {}
   async writeThinking(): Promise<void> {}
   async writeText(): Promise<void> {}
+  async writeToolPendingApproval(): Promise<{ approved: boolean; rejectionReason?: string }> {
+    // Auto-approve for delegation - sub-agents don't need human approval
+    return { approved: true };
+  }
   async writeToolStarting(): Promise<void> {}
   async writeToolComplete(): Promise<void> {}
   async writeStepComplete(): Promise<void> {}

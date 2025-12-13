@@ -167,4 +167,14 @@ export class TestClient {
   async getAgentTypes(): Promise<{ type: string; description: string }[]> {
     return this.request('GET', '/agents/types');
   }
+
+  // ==================== Generic Methods ====================
+
+  async get<T = any>(path: string): Promise<T> {
+    return this.request('GET', path);
+  }
+
+  async post<T = any>(path: string, body?: unknown): Promise<T> {
+    return this.request('POST', path, body);
+  }
 }

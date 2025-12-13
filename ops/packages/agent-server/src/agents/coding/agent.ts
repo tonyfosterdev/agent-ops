@@ -17,6 +17,12 @@ import {
 import { getSystemPrompt } from './prompts.js';
 import type { OutputSink } from '../../sinks/OutputSink.js';
 import type { ConversationContext } from '../../services/ContextService.js';
+import {
+  wrapToolsWithApproval,
+  setToolContext,
+  updateStepNumber,
+  generateToolCallId,
+} from '../../tools/HITMToolWrapper.js';
 
 export class CodingAgent extends BaseAgent {
   private shellTool: any;
@@ -83,20 +89,33 @@ export class CodingAgent extends BaseAgent {
     try {
       let currentStepNumber = 0;
 
+      // Wrap tools with HITM approval
+      const rawTools = {
+        shell_command_execute: this.shellTool,
+        read_file: this.readFileTool,
+        write_file: this.writeFileTool,
+        find_files: this.findFilesTool,
+        search_code: this.searchCodeTool,
+      };
+      const wrappedTools = wrapToolsWithApproval(rawTools);
+
+      // Set tool context for HITM approval
+      setToolContext({
+        sink,
+        stepNumber: currentStepNumber,
+        generateToolCallId,
+      });
+
       const result = await generateText({
         model: this.model,
         maxSteps: this.config.maxSteps,
         system: systemPrompt,
         messages,
-        tools: {
-          shell_command_execute: this.shellTool,
-          read_file: this.readFileTool,
-          write_file: this.writeFileTool,
-          find_files: this.findFilesTool,
-          search_code: this.searchCodeTool,
-        },
+        tools: wrappedTools,
         onStepFinish: async ({ text, toolCalls, toolResults }) => {
           currentStepNumber++;
+          // Update step number in context for next tools
+          updateStepNumber(currentStepNumber);
 
           // Write text entry if there's text
           if (text) {
@@ -133,6 +152,9 @@ export class CodingAgent extends BaseAgent {
         },
       });
 
+      // Clear tool context after execution
+      setToolContext(null);
+
       const finalText = result.text;
       const stepsUsed = result.steps?.length || 0;
 
@@ -163,6 +185,8 @@ export class CodingAgent extends BaseAgent {
 
       return agentResult;
     } catch (error: any) {
+      // Clear tool context on error
+      setToolContext(null);
       await sink.writeRunError(error.message);
 
       return {

@@ -24,6 +24,18 @@ export interface OutputSink {
   writeText(text: string, stepNumber: number): Promise<void>;
 
   /**
+   * Write a tool:pending_approval entry and wait for human approval.
+   * This method BLOCKS until the approval is resolved.
+   * Returns the approval result (approved/rejected).
+   */
+  writeToolPendingApproval(
+    toolName: string,
+    toolCallId: string,
+    args: Record<string, unknown>,
+    stepNumber: number
+  ): Promise<{ approved: boolean; rejectionReason?: string }>;
+
+  /**
    * Write a tool:starting entry - tool execution is beginning
    */
   writeToolStarting(

@@ -13,6 +13,12 @@ import { createLokiQueryTool, createLogAnalysisTool, createReportGenerationTool 
 import { getSystemPrompt } from './prompts.js';
 import type { OutputSink } from '../../sinks/OutputSink.js';
 import type { ConversationContext } from '../../services/ContextService.js';
+import {
+  wrapToolsWithApproval,
+  setToolContext,
+  updateStepNumber,
+  generateToolCallId,
+} from '../../tools/HITMToolWrapper.js';
 
 export class LogAnalyzerAgent extends BaseAgent {
   private lokiQueryTool: any;
@@ -78,18 +84,31 @@ export class LogAnalyzerAgent extends BaseAgent {
     try {
       let currentStepNumber = 0;
 
+      // Wrap tools with HITM approval
+      const rawTools = {
+        loki_query: this.lokiQueryTool,
+        analyze_logs: this.logAnalysisTool,
+        generate_report: this.reportGenerationTool,
+      };
+      const wrappedTools = wrapToolsWithApproval(rawTools);
+
+      // Set tool context for HITM approval
+      setToolContext({
+        sink,
+        stepNumber: currentStepNumber,
+        generateToolCallId,
+      });
+
       const result = await generateText({
         model: this.model,
         maxSteps: this.config.maxSteps,
         system: systemPrompt,
         messages,
-        tools: {
-          loki_query: this.lokiQueryTool,
-          analyze_logs: this.logAnalysisTool,
-          generate_report: this.reportGenerationTool,
-        },
+        tools: wrappedTools,
         onStepFinish: async ({ text, toolCalls, toolResults }) => {
           currentStepNumber++;
+          // Update step number in context for next tools
+          updateStepNumber(currentStepNumber);
 
           // Write text entry if there's text
           if (text) {
@@ -126,6 +145,9 @@ export class LogAnalyzerAgent extends BaseAgent {
         },
       });
 
+      // Clear tool context after execution
+      setToolContext(null);
+
       const finalText = result.text;
       const stepsUsed = result.steps?.length || 0;
 
@@ -154,6 +176,8 @@ export class LogAnalyzerAgent extends BaseAgent {
 
       return agentResult;
     } catch (error: any) {
+      // Clear tool context on error
+      setToolContext(null);
       await sink.writeRunError(error.message);
 
       return {

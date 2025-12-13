@@ -1,5 +1,6 @@
 import type { OutputSink } from './OutputSink.js';
 import type { JournalService } from '../services/JournalService.js';
+import { ApprovalService } from '../services/ApprovalService.js';
 
 /**
  * OutputSink implementation that writes to the database journal.
@@ -10,11 +11,13 @@ export class JournalOutputSink implements OutputSink {
   private journal: JournalService;
   private startTime: number;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private approvalService: ApprovalService;
 
   constructor(runId: string, journal: JournalService) {
     this.runId = runId;
     this.journal = journal;
     this.startTime = Date.now();
+    this.approvalService = new ApprovalService();
   }
 
   async writeRunStarted(data: {
@@ -34,6 +37,54 @@ export class JournalOutputSink implements OutputSink {
 
   async writeText(text: string, stepNumber: number): Promise<void> {
     await this.journal.writeEntry(this.runId, 'text', { text }, stepNumber);
+  }
+
+  async writeToolPendingApproval(
+    toolName: string,
+    toolCallId: string,
+    args: Record<string, unknown>,
+    stepNumber: number
+  ): Promise<{ approved: boolean; rejectionReason?: string }> {
+    // Stop heartbeat while waiting for approval
+    this.stopHeartbeat();
+
+    // Write pending approval entry to journal (will be sent via SSE)
+    await this.journal.writeEntry(
+      this.runId,
+      'tool:pending_approval',
+      { toolName, toolCallId, args },
+      stepNumber
+    );
+
+    // Block until approval is received (or timeout)
+    const result = await this.approvalService.requestApproval({
+      runId: this.runId,
+      toolCallId,
+      toolName,
+      args,
+      stepNumber,
+    });
+
+    // Write resolution entry
+    if (result.status === 'approved') {
+      await this.journal.writeEntry(
+        this.runId,
+        'tool:approved',
+        { toolName, toolCallId },
+        stepNumber
+      );
+      // Restart heartbeat for continued execution
+      this.startHeartbeat();
+      return { approved: true };
+    } else {
+      await this.journal.writeEntry(
+        this.runId,
+        'tool:rejected',
+        { toolName, toolCallId, reason: result.rejectionReason },
+        stepNumber
+      );
+      return { approved: false, rejectionReason: result.rejectionReason };
+    }
   }
 
   async writeToolStarting(

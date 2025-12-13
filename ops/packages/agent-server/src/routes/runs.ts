@@ -72,18 +72,29 @@ app.get('/:runId/subscribe', async (c) => {
       const entries = await journalService.getEntriesSince(runId, lastSequence);
 
       for (const entry of entries) {
-        await stream.writeln(
-          `data: ${JSON.stringify({
-            type: 'entry',
-            entry: {
-              id: entry.id,
-              entry_type: entry.entry_type,
-              step_number: entry.step_number,
-              data: entry.data,
-              created_at: entry.created_at,
-            },
-          })}`
-        );
+        // Build base event data
+        const eventData: Record<string, unknown> = {
+          type: 'entry',
+          entry: {
+            id: entry.id,
+            entry_type: entry.entry_type,
+            step_number: entry.step_number,
+            data: entry.data,
+            created_at: entry.created_at,
+          },
+        };
+
+        // Add action hints for approval-required entries
+        if (entry.entry_type === 'tool:pending_approval') {
+          const toolCallId = (entry.data as { toolCallId?: string })?.toolCallId;
+          eventData.requiresAction = true;
+          eventData.actionEndpoints = {
+            approve: `/runs/${runId}/tools/${toolCallId}/approve`,
+            reject: `/runs/${runId}/tools/${toolCallId}/reject`,
+          };
+        }
+
+        await stream.writeln(`data: ${JSON.stringify(eventData)}`);
 
         lastSequence = entry.sequence_number;
 
