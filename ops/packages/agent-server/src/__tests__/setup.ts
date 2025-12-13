@@ -25,6 +25,7 @@ import { AppDataSource } from '../database.js';
 import { Session } from '../entities/Session.js';
 import { AgentRun } from '../entities/AgentRun.js';
 import { JournalEntry } from '../entities/JournalEntry.js';
+import { ToolApproval } from '../entities/ToolApproval.js';
 
 // Re-export for tests that need direct access
 export { AppDataSource as TestDataSource };
@@ -45,23 +46,51 @@ export async function cleanDatabase(): Promise<void> {
   if (!AppDataSource.isInitialized) return;
 
   // Use query builder to handle empty tables gracefully
-  await AppDataSource.getRepository(JournalEntry)
-    .createQueryBuilder()
-    .delete()
-    .from(JournalEntry)
-    .execute();
+  // Delete in order respecting foreign key constraints:
+  // 1. JournalEntry (references AgentRun)
+  // 2. ToolApproval (references AgentRun via run_id)
+  // 3. AgentRun (references Session)
+  // 4. Session
 
-  await AppDataSource.getRepository(AgentRun)
-    .createQueryBuilder()
-    .delete()
-    .from(AgentRun)
-    .execute();
+  try {
+    await AppDataSource.getRepository(JournalEntry)
+      .createQueryBuilder()
+      .delete()
+      .from(JournalEntry)
+      .execute();
+  } catch {
+    // Table may not exist yet
+  }
 
-  await AppDataSource.getRepository(Session)
-    .createQueryBuilder()
-    .delete()
-    .from(Session)
-    .execute();
+  try {
+    await AppDataSource.getRepository(ToolApproval)
+      .createQueryBuilder()
+      .delete()
+      .from(ToolApproval)
+      .execute();
+  } catch {
+    // Table may not exist yet
+  }
+
+  try {
+    await AppDataSource.getRepository(AgentRun)
+      .createQueryBuilder()
+      .delete()
+      .from(AgentRun)
+      .execute();
+  } catch {
+    // Table may not exist yet
+  }
+
+  try {
+    await AppDataSource.getRepository(Session)
+      .createQueryBuilder()
+      .delete()
+      .from(Session)
+      .execute();
+  } catch {
+    // Table may not exist yet
+  }
 }
 
 /**

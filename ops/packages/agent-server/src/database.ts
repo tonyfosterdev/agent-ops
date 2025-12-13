@@ -4,6 +4,7 @@ import { config, logger } from './config.js';
 import { Session } from './entities/Session.js';
 import { AgentRun } from './entities/AgentRun.js';
 import { JournalEntry } from './entities/JournalEntry.js';
+import { ToolApproval } from './entities/ToolApproval.js';
 
 export const AppDataSource = new DataSource({
   type: 'postgres',
@@ -12,9 +13,9 @@ export const AppDataSource = new DataSource({
   username: config.db.username,
   password: config.db.password,
   database: config.db.database,
-  synchronize: config.nodeEnv === 'development',
+  synchronize: config.nodeEnv === 'development' || config.nodeEnv === 'test',
   logging: config.nodeEnv === 'development',
-  entities: [Session, AgentRun, JournalEntry],
+  entities: [Session, AgentRun, JournalEntry, ToolApproval],
 });
 
 export async function initializeDatabase(): Promise<void> {
