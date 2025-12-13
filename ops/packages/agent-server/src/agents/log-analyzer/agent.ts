@@ -5,13 +5,14 @@
  * for the distributed bookstore system using Grafana Loki.
  */
 
-import { streamText } from 'ai';
+import { generateText } from 'ai';
 import { BaseAgent } from 'ops-shared/base/BaseAgent';
 import type { AgentConfig, AgentResult } from 'ops-shared/types';
 import { getLokiConfig } from 'ops-shared/config';
-import { createLokiQueryTool, createLogAnalysisTool, createReportGenerationTool } from './tools';
-import { getSystemPrompt } from './prompts';
-import { processStream } from '../../utils/streamingHelper';
+import { createLokiQueryTool, createLogAnalysisTool, createReportGenerationTool } from './tools/index.js';
+import { getSystemPrompt } from './prompts.js';
+import type { OutputSink } from '../../sinks/OutputSink.js';
+import type { ConversationContext } from '../../services/ContextService.js';
 
 export class LogAnalyzerAgent extends BaseAgent {
   private lokiQueryTool: any;
@@ -44,155 +45,91 @@ export class LogAnalyzerAgent extends BaseAgent {
    * Run the log analyzer agent with an investigation task
    *
    * @param task - The investigation description (e.g., "Why is warehouse-alpha failing?")
+   * @param context - Conversation context from previous runs
+   * @param sink - Output sink for writing execution progress
    * @returns AgentResult with execution results
    */
-  async run(task: string): Promise<AgentResult> {
+  async run(
+    task: string,
+    context: ConversationContext,
+    sink: OutputSink
+  ): Promise<AgentResult> {
     this.ensureInitialized();
 
-    // Emit agent start event
-    this.emitEvent({
-      type: 'agent:start',
+    await sink.writeRunStarted({
       task,
       maxSteps: this.config.maxSteps,
+      agentType: this.config.agentType,
     });
 
-    console.log(`\n${'='.repeat(60)}`);
-    console.log('LOG ANALYZER AGENT STARTING');
-    console.log(`${'='.repeat(60)}`);
-    console.log(`Task: ${task}`);
-    console.log(`Max Steps: ${this.config.maxSteps}`);
-    console.log(`Loki URL: ${this.lokiUrl}`);
-    console.log(`${'-'.repeat(60)}\n`);
+    // Build system prompt with context
+    let systemPrompt = getSystemPrompt();
+    if (context.summary) {
+      systemPrompt += `\n\n## Previous Context\n${context.summary}`;
+    }
+
+    // Build messages array from context
+    const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    for (const msg of context.recentMessages) {
+      messages.push({ role: msg.role, content: msg.content });
+    }
+    messages.push({ role: 'user', content: task });
 
     try {
-      // Track step number for events
-      let currentStepNumber = 1;
-      let stepText = '';
+      let currentStepNumber = 0;
 
-      // Emit initial step start
-      this.emitEvent({
-        type: 'step:start',
-        stepNumber: currentStepNumber,
-      });
-
-      // Execute agent loop with streamText for real-time feedback
-      const result = await streamText({
+      const result = await generateText({
         model: this.model,
         maxSteps: this.config.maxSteps,
-        system: getSystemPrompt(),
-        prompt: task,
+        system: systemPrompt,
+        messages,
         tools: {
           loki_query: this.lokiQueryTool,
           analyze_logs: this.logAnalysisTool,
           generate_report: this.reportGenerationTool,
         },
-        // Enable tool call streaming for early notification
-        experimental_toolCallStreaming: true,
-      });
-
-      // Process stream and emit real-time events
-      await processStream(result, {
-        onTextChunk: (chunk, isComplete) => {
-          if (chunk) {
-            // Write to console in real-time
-            process.stdout.write(chunk);
-            stepText += chunk;
-          }
-
-          // Emit streaming text event
-          this.emitEvent({
-            type: 'step:text_chunk',
-            stepNumber: currentStepNumber,
-            chunk,
-            isComplete,
-          });
-        },
-
-        onToolCallStreamingStart: (toolCallId, toolName) => {
-          // Emit early notification that a tool is being called
-          this.emitEvent({
-            type: 'step:tool_call_streaming_start',
-            stepNumber: currentStepNumber,
-            toolName,
-            toolCallId,
-          });
-        },
-
-        onToolCall: (toolCallId, toolName, args) => {
-          console.log(`\n⋯ ${toolName}...`);
-
-          // Emit tool call start event (args now complete)
-          this.emitEvent({
-            type: 'step:tool_call_start',
-            stepNumber: currentStepNumber,
-            toolName,
-            toolCallId,
-            args,
-          });
-        },
-
-        onToolResult: (toolCallId, toolName, resultData) => {
-          const res = resultData as any;
-          const success = res?.success !== false;
-          const summary = this.generateToolSummary(toolName, res);
-          const icon = success ? '✓' : '✗';
-          console.log(`${icon} ${summary}`);
-
-          // Emit tool call complete event
-          this.emitEvent({
-            type: 'step:tool_call_complete',
-            stepNumber: currentStepNumber,
-            toolName,
-            result: resultData,
-            success,
-            summary,
-          });
-        },
-
-        onStepComplete: (stepNumber) => {
-          // Emit text complete for this step (with accumulated text)
-          if (stepText) {
-            this.emitEvent({
-              type: 'step:text_complete',
-              stepNumber: currentStepNumber,
-              text: stepText,
-            });
-            stepText = '';
-          }
-
-          // Emit step complete event
-          this.emitEvent({
-            type: 'step:complete',
-            stepNumber: currentStepNumber,
-          });
-
-          console.log('');
-
-          // Prepare for next step
+        onStepFinish: async ({ text, toolCalls, toolResults }) => {
           currentStepNumber++;
-          this.emitEvent({
-            type: 'step:start',
-            stepNumber: currentStepNumber,
-          });
-        },
 
-        onError: (error) => {
-          this.log('error', 'Stream error', error);
+          // Write text entry if there's text
+          if (text) {
+            await sink.writeText(text, currentStepNumber);
+          }
+
+          // Write tool entries
+          for (let i = 0; i < toolCalls.length; i++) {
+            const call = toolCalls[i];
+            const toolResult = toolResults[i];
+
+            await sink.writeToolStarting(
+              call.toolName,
+              call.toolCallId,
+              call.args,
+              currentStepNumber
+            );
+
+            const resultData = toolResult?.result as any;
+            const success = resultData?.success !== false;
+            const summary = this.generateToolSummary(call.toolName, resultData);
+
+            await sink.writeToolComplete(
+              call.toolName,
+              call.toolCallId,
+              resultData,
+              success,
+              summary,
+              currentStepNumber
+            );
+          }
+
+          await sink.writeStepComplete(currentStepNumber);
         },
       });
 
-      // Get final result after stream completes
-      const finalText = await result.text;
-      const steps = await result.steps;
-      const stepsUsed = steps?.length || 0;
+      const finalText = result.text;
+      const stepsUsed = result.steps?.length || 0;
 
-      console.log(`\n${'='.repeat(60)}`);
-      console.log('LOG ANALYZER AGENT COMPLETED');
-      console.log(`${'='.repeat(60)}`);
-      console.log(`Steps Used: ${stepsUsed}/${this.config.maxSteps}`);
-      console.log(`${'='.repeat(60)}\n`);
-
-      // Determine success based on final response
+      // Determine success
       const lowerText = finalText.toLowerCase();
       const success =
         lowerText.includes('analysis complete') ||
@@ -200,11 +137,7 @@ export class LogAnalyzerAgent extends BaseAgent {
         lowerText.includes('found') ||
         lowerText.includes('error') ||
         lowerText.includes('issue') ||
-        lowerText.includes('cause') ||
-        lowerText.includes('stack trace') ||
-        lowerText.includes('location:') ||
-        lowerText.includes('service:') ||
-        lowerText.includes('the problem');
+        lowerText.includes('cause');
 
       const agentResult: AgentResult = {
         success,
@@ -213,23 +146,15 @@ export class LogAnalyzerAgent extends BaseAgent {
         trace: [],
       };
 
-      // Emit agent complete event
-      this.emitEvent({
-        type: 'agent:complete',
-        result: agentResult,
+      await sink.writeRunComplete({
+        success,
+        message: finalText,
+        steps: stepsUsed,
       });
 
       return agentResult;
     } catch (error: any) {
-      this.log('error', 'Agent execution failed', error);
-      console.error('\n❌ LOG ANALYZER AGENT ERROR:');
-      console.error(error.message);
-
-      // Emit agent error event
-      this.emitEvent({
-        type: 'agent:error',
-        error: error.message,
-      });
+      await sink.writeRunError(error.message);
 
       return {
         success: false,
@@ -246,15 +171,15 @@ export class LogAnalyzerAgent extends BaseAgent {
   private generateToolSummary(toolName: string, result: any): string {
     switch (toolName) {
       case 'loki_query':
-        const count = result.totalCount || 0;
+        const count = result?.totalCount || 0;
         return `Queried logs: ${count} entries found`;
 
       case 'analyze_logs':
-        const findings = result.findingsCount || 0;
+        const findings = result?.findingsCount || 0;
         return `Analyzed logs: ${findings} findings`;
 
       case 'generate_report':
-        return `Generated ${result.format || 'text'} report`;
+        return `Generated ${result?.format || 'text'} report`;
 
       default:
         return `Executed ${toolName}`;

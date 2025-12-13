@@ -1,0 +1,108 @@
+import type { OutputSink } from './OutputSink.js';
+import type { JournalService } from '../services/JournalService.js';
+
+/**
+ * OutputSink implementation that writes to the database journal.
+ * Manages heartbeat internally to indicate "thinking" state.
+ */
+export class JournalOutputSink implements OutputSink {
+  private runId: string;
+  private journal: JournalService;
+  private startTime: number;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+
+  constructor(runId: string, journal: JournalService) {
+    this.runId = runId;
+    this.journal = journal;
+    this.startTime = Date.now();
+  }
+
+  async writeRunStarted(data: {
+    task: string;
+    maxSteps: number;
+    agentType: string;
+  }): Promise<void> {
+    await this.journal.writeEntry(this.runId, 'run:started', data);
+    this.startHeartbeat();
+  }
+
+  async writeThinking(elapsedMs: number): Promise<void> {
+    await this.journal.writeEntry(this.runId, 'thinking', {
+      elapsed_ms: elapsedMs,
+    });
+  }
+
+  async writeText(text: string, stepNumber: number): Promise<void> {
+    await this.journal.writeEntry(this.runId, 'text', { text }, stepNumber);
+  }
+
+  async writeToolStarting(
+    toolName: string,
+    toolCallId: string,
+    args: Record<string, unknown>,
+    stepNumber: number
+  ): Promise<void> {
+    this.stopHeartbeat();
+    await this.journal.writeEntry(
+      this.runId,
+      'tool:starting',
+      { toolName, toolCallId, args },
+      stepNumber
+    );
+  }
+
+  async writeToolComplete(
+    toolName: string,
+    toolCallId: string,
+    result: unknown,
+    success: boolean,
+    summary: string,
+    stepNumber: number
+  ): Promise<void> {
+    await this.journal.writeEntry(
+      this.runId,
+      'tool:complete',
+      { toolName, toolCallId, result, success, summary },
+      stepNumber
+    );
+  }
+
+  async writeStepComplete(stepNumber: number): Promise<void> {
+    await this.journal.writeEntry(this.runId, 'step:complete', {}, stepNumber);
+    this.startHeartbeat();
+  }
+
+  async writeRunComplete(result: {
+    success: boolean;
+    message: string;
+    steps: number;
+  }): Promise<void> {
+    this.stopHeartbeat();
+    await this.journal.writeEntry(this.runId, 'run:complete', result);
+    await this.journal.completeRun(this.runId, result);
+  }
+
+  async writeRunError(error: string): Promise<void> {
+    this.stopHeartbeat();
+    await this.journal.writeEntry(this.runId, 'run:error', { error });
+    await this.journal.failRun(this.runId, error);
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatInterval = setInterval(async () => {
+      try {
+        await this.writeThinking(Date.now() - this.startTime);
+      } catch {
+        // Ignore heartbeat errors - non-critical
+      }
+    }, 2000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+}

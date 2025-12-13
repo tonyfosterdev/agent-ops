@@ -1,27 +1,38 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import { AgentClient } from '../api/client.js';
 
 interface OutputItem {
-  type: 'task' | 'text' | 'text_chunk' | 'tool' | 'tool_starting' | 'complete' | 'error';
+  type: 'task' | 'text' | 'text_chunk' | 'tool' | 'tool_starting' | 'thinking' | 'complete' | 'error';
   content: string;
   success?: boolean;
 }
 
 interface Props {
   task: string;
+  sessionId?: string | null;
   onOutput: (item: OutputItem) => void;
-  onComplete: () => void;
+  onComplete: (sessionId: string | null) => void;
 }
 
-interface Event {
-  type: string;
-  [key: string]: any;
+interface JournalEvent {
+  type: 'entry' | 'complete';
+  entry?: {
+    entry_type: string;
+    data: Record<string, any>;
+    step_number?: number;
+  };
+  run?: {
+    id: string;
+    status: string;
+    result?: Record<string, any>;
+  };
 }
 
-export function AgentRunner({ task, onOutput, onComplete }: Props) {
+export function AgentRunner({ task, sessionId, onOutput, onComplete }: Props) {
   const hasStarted = useRef(false);
+  const [thinkingTime, setThinkingTime] = useState(0);
 
   useEffect(() => {
     // Prevent double execution
@@ -30,71 +41,95 @@ export function AgentRunner({ task, onOutput, onComplete }: Props) {
 
     const client = new AgentClient();
 
+    // Set session ID if provided
+    if (sessionId) {
+      client.setSessionId(sessionId);
+    }
+
     // Health check first
-    client.healthCheck().then(healthy => {
+    client.healthCheck().then((healthy) => {
       if (!healthy) {
         onOutput({ type: 'error', content: 'Agent server is unreachable. Please ensure it is running.' });
-        onComplete();
+        onComplete(null);
         return;
       }
 
-      // Subscribe to events
-      client.on('event', (event: Event) => {
-        switch (event.type) {
-          // Real-time text streaming
-          case 'step:text_chunk':
-            if (event.chunk) {
-              onOutput({ type: 'text_chunk', content: event.chunk });
-            }
-            break;
+      // Subscribe to journal events
+      client.on('event', (event: JournalEvent) => {
+        if (event.type === 'entry' && event.entry) {
+          const entry = event.entry;
 
-          // Full text for step (backup if chunks weren't received)
-          case 'step:text_complete':
-            // We don't need to do anything here since we already streamed the text
-            // This is just a marker that the text for this step is complete
-            break;
+          switch (entry.entry_type) {
+            case 'thinking':
+              // Update thinking time indicator
+              setThinkingTime(entry.data.elapsed_ms || 0);
+              break;
 
-          // Tool is starting to be called (early notification)
-          case 'step:tool_call_streaming_start':
-            onOutput({
-              type: 'tool_starting',
-              content: event.toolName,
-            });
-            break;
+            case 'text':
+              // Text output from agent
+              if (entry.data.text) {
+                onOutput({ type: 'text', content: entry.data.text });
+              }
+              break;
 
-          // Tool execution completed
-          case 'step:tool_call_complete':
-            onOutput({
-              type: 'tool',
-              content: event.summary || event.toolName,
-              success: event.success,
-            });
-            break;
+            case 'tool:starting':
+              // Tool is starting
+              onOutput({
+                type: 'tool_starting',
+                content: entry.data.toolName,
+              });
+              break;
 
-          case 'agent:complete':
-            onComplete();
-            break;
+            case 'tool:complete':
+              // Tool execution completed
+              onOutput({
+                type: 'tool',
+                content: entry.data.summary || entry.data.toolName,
+                success: entry.data.success,
+              });
+              break;
 
-          case 'agent:error':
-            onOutput({ type: 'error', content: event.error || 'Unknown error' });
-            onComplete();
-            break;
+            case 'run:complete':
+              // Run completed successfully
+              onOutput({ type: 'complete', content: '' });
+              break;
+
+            case 'run:error':
+              // Run failed with error
+              onOutput({ type: 'error', content: entry.data.error || 'Unknown error' });
+              break;
+
+            case 'step:complete':
+              // Step completed, reset thinking time
+              setThinkingTime(0);
+              break;
+          }
+        } else if (event.type === 'complete') {
+          // Stream completed, pass back session ID
+          onComplete(client.getSessionId());
         }
       });
 
       // Run agent
-      client.runAgent('orchestration', task).catch(err => {
+      client.runAgent('orchestration', task).catch((err) => {
         onOutput({ type: 'error', content: err.message });
-        onComplete();
+        onComplete(client.getSessionId());
       });
     });
   }, []);
 
-  // Show a spinner while running
+  // Format thinking time for display
+  const formatThinkingTime = (ms: number): string => {
+    const seconds = Math.floor(ms / 1000);
+    return `${seconds}s`;
+  };
+
+  // Show a spinner with optional thinking time
   return (
     <Box>
       <Text color="yellow">
         <Spinner type="dots" />
+        {thinkingTime > 0 && <Text color="gray"> {formatThinkingTime(thinkingTime)}</Text>}
       </Text>
     </Box>
   );

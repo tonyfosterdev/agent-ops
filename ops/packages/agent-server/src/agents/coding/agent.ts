@@ -4,7 +4,7 @@
  * Extends BaseAgent to provide systematic code debugging and fixing capabilities.
  */
 
-import { streamText } from 'ai';
+import { generateText } from 'ai';
 import { BaseAgent } from 'ops-shared/base/BaseAgent';
 import type { AgentConfig, AgentResult } from 'ops-shared/types';
 import {
@@ -13,9 +13,10 @@ import {
   createWriteFileTool,
   createFindFilesTool,
   createSearchCodeTool,
-} from './tools';
-import { getSystemPrompt } from './prompts';
-import { processStream } from '../../utils/streamingHelper';
+} from './tools/index.js';
+import { getSystemPrompt } from './prompts.js';
+import type { OutputSink } from '../../sinks/OutputSink.js';
+import type { ConversationContext } from '../../services/ContextService.js';
 
 export class CodingAgent extends BaseAgent {
   private shellTool: any;
@@ -49,42 +50,44 @@ export class CodingAgent extends BaseAgent {
    * Run the coding agent with a debugging task
    *
    * @param task - The task description (e.g., "Fix test-cases/app.ts")
+   * @param context - Conversation context from previous runs
+   * @param sink - Output sink for writing execution progress
    * @returns AgentResult with execution results
    */
-  async run(task: string): Promise<AgentResult> {
+  async run(
+    task: string,
+    context: ConversationContext,
+    sink: OutputSink
+  ): Promise<AgentResult> {
     this.ensureInitialized();
 
-    // Emit agent start event
-    this.emitEvent({
-      type: 'agent:start',
+    await sink.writeRunStarted({
       task,
       maxSteps: this.config.maxSteps,
+      agentType: this.config.agentType,
     });
 
-    console.log(`\n${'='.repeat(60)}`);
-    console.log('CODING AGENT STARTING');
-    console.log(`${'='.repeat(60)}`);
-    console.log(`Task: ${task}`);
-    console.log(`Max Steps: ${this.config.maxSteps}`);
-    console.log(`${'-'.repeat(60)}\n`);
+    // Build system prompt with context
+    let systemPrompt = getSystemPrompt();
+    if (context.summary) {
+      systemPrompt += `\n\n## Previous Context\n${context.summary}`;
+    }
+
+    // Build messages array from context
+    const messages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    for (const msg of context.recentMessages) {
+      messages.push({ role: msg.role, content: msg.content });
+    }
+    messages.push({ role: 'user', content: task });
 
     try {
-      // Track step number for events
-      let currentStepNumber = 1;
-      let stepText = '';
+      let currentStepNumber = 0;
 
-      // Emit initial step start
-      this.emitEvent({
-        type: 'step:start',
-        stepNumber: currentStepNumber,
-      });
-
-      // Execute agent loop with streamText for real-time feedback
-      const result = await streamText({
+      const result = await generateText({
         model: this.model,
         maxSteps: this.config.maxSteps,
-        system: getSystemPrompt(),
-        prompt: task,
+        system: systemPrompt,
+        messages,
         tools: {
           shell_command_execute: this.shellTool,
           read_file: this.readFileTool,
@@ -92,113 +95,48 @@ export class CodingAgent extends BaseAgent {
           find_files: this.findFilesTool,
           search_code: this.searchCodeTool,
         },
-        // Enable tool call streaming for early notification
-        experimental_toolCallStreaming: true,
-      });
-
-      // Process stream and emit real-time events
-      await processStream(result, {
-        onTextChunk: (chunk, isComplete) => {
-          if (chunk) {
-            // Write to console in real-time
-            process.stdout.write(chunk);
-            stepText += chunk;
-          }
-
-          // Emit streaming text event
-          this.emitEvent({
-            type: 'step:text_chunk',
-            stepNumber: currentStepNumber,
-            chunk,
-            isComplete,
-          });
-        },
-
-        onToolCallStreamingStart: (toolCallId, toolName) => {
-          // Emit early notification that a tool is being called
-          this.emitEvent({
-            type: 'step:tool_call_streaming_start',
-            stepNumber: currentStepNumber,
-            toolName,
-            toolCallId,
-          });
-        },
-
-        onToolCall: (toolCallId, toolName, args) => {
-          console.log(`\n⋯ ${toolName}...`);
-
-          // Emit tool call start event (args now complete)
-          this.emitEvent({
-            type: 'step:tool_call_start',
-            stepNumber: currentStepNumber,
-            toolName,
-            toolCallId,
-            args,
-          });
-        },
-
-        onToolResult: (toolCallId, toolName, resultData) => {
-          const res = resultData as any;
-          const success = res?.success !== false && res?.exitCode === 0;
-          const summary = this.generateToolSummary(toolName, res);
-          const icon = success ? '✓' : '✗';
-          console.log(`${icon} ${summary}`);
-
-          // Emit tool call complete event
-          this.emitEvent({
-            type: 'step:tool_call_complete',
-            stepNumber: currentStepNumber,
-            toolName,
-            result: resultData,
-            success,
-            summary,
-          });
-        },
-
-        onStepComplete: (stepNumber) => {
-          // Emit text complete for this step (with accumulated text)
-          if (stepText) {
-            this.emitEvent({
-              type: 'step:text_complete',
-              stepNumber: currentStepNumber,
-              text: stepText,
-            });
-            stepText = '';
-          }
-
-          // Emit step complete event
-          this.emitEvent({
-            type: 'step:complete',
-            stepNumber: currentStepNumber,
-          });
-
-          console.log('');
-
-          // Prepare for next step
+        onStepFinish: async ({ text, toolCalls, toolResults }) => {
           currentStepNumber++;
-          this.emitEvent({
-            type: 'step:start',
-            stepNumber: currentStepNumber,
-          });
-        },
 
-        onError: (error) => {
-          this.log('error', 'Stream error', error);
+          // Write text entry if there's text
+          if (text) {
+            await sink.writeText(text, currentStepNumber);
+          }
+
+          // Write tool entries
+          for (let i = 0; i < toolCalls.length; i++) {
+            const call = toolCalls[i];
+            const toolResult = toolResults[i];
+
+            await sink.writeToolStarting(
+              call.toolName,
+              call.toolCallId,
+              call.args,
+              currentStepNumber
+            );
+
+            const resultData = toolResult?.result as any;
+            const success = resultData?.success !== false && resultData?.exitCode !== 1;
+            const summary = this.generateToolSummary(call.toolName, resultData);
+
+            await sink.writeToolComplete(
+              call.toolName,
+              call.toolCallId,
+              resultData,
+              success,
+              summary,
+              currentStepNumber
+            );
+          }
+
+          await sink.writeStepComplete(currentStepNumber);
         },
       });
 
-      // Get final result after stream completes
-      const finalText = await result.text;
-      const steps = await result.steps;
-      const stepsUsed = steps?.length || 0;
+      const finalText = result.text;
+      const stepsUsed = result.steps?.length || 0;
 
-      console.log(`\n${'='.repeat(60)}`);
-      console.log('CODING AGENT COMPLETED');
-      console.log(`${'='.repeat(60)}`);
-      console.log(`Steps Used: ${stepsUsed}/${this.config.maxSteps}`);
-      console.log(`${'='.repeat(60)}\n`);
-
-      // Determine success based on final response
+      // Determine success
       const lowerText = finalText.toLowerCase();
       const success =
         lowerText.includes('task complete') ||
@@ -208,10 +146,7 @@ export class CodingAgent extends BaseAgent {
         lowerText.includes('have fixed') ||
         lowerText.includes('has been fixed') ||
         lowerText.includes('issue resolved') ||
-        lowerText.includes('error resolved') ||
-        lowerText.includes('removed the') ||
-        lowerText.includes('file changed:') ||
-        lowerText.includes('line(s) modified:');
+        lowerText.includes('error resolved');
 
       const agentResult: AgentResult = {
         success,
@@ -220,23 +155,15 @@ export class CodingAgent extends BaseAgent {
         trace: [],
       };
 
-      // Emit agent complete event
-      this.emitEvent({
-        type: 'agent:complete',
-        result: agentResult,
+      await sink.writeRunComplete({
+        success,
+        message: finalText,
+        steps: stepsUsed,
       });
 
       return agentResult;
     } catch (error: any) {
-      this.log('error', 'Agent execution failed', error);
-      console.error('\n❌ CODING AGENT ERROR:');
-      console.error(error.message);
-
-      // Emit agent error event
-      this.emitEvent({
-        type: 'agent:error',
-        error: error.message,
-      });
+      await sink.writeRunError(error.message);
 
       return {
         success: false,
@@ -253,24 +180,24 @@ export class CodingAgent extends BaseAgent {
   private generateToolSummary(toolName: string, result: any): string {
     switch (toolName) {
       case 'shell_command_execute':
-        const cmd = result.command || '';
+        const cmd = result?.command || '';
         const shortCmd = cmd.length > 40 ? cmd.slice(0, 40) + '...' : cmd;
-        return result.exitCode === 0
+        return result?.exitCode === 0
           ? `Executed: ${shortCmd}`
-          : `Failed (exit ${result.exitCode}): ${shortCmd}`;
+          : `Failed (exit ${result?.exitCode}): ${shortCmd}`;
 
       case 'read_file':
-        return `Read file: ${result.path || 'unknown'}`;
+        return `Read file: ${result?.path || 'unknown'}`;
 
       case 'write_file':
-        return `Wrote file: ${result.path || 'unknown'}`;
+        return `Wrote file: ${result?.path || 'unknown'}`;
 
       case 'find_files':
-        const count = result.files?.length || 0;
+        const count = result?.files?.length || 0;
         return `Found ${count} file(s)`;
 
       case 'search_code':
-        const matches = result.matches?.length || 0;
+        const matches = result?.matches?.length || 0;
         return `Found ${matches} match(es)`;
 
       default:

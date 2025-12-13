@@ -23,6 +23,7 @@ program
   .description('Run an agent task directly')
   .option('-a, --agent <type>', 'Agent type (coding|log-analyzer|orchestration)', 'orchestration')
   .option('-s, --max-steps <number>', 'Maximum steps', '10')
+  .option('--session-id <id>', 'Continue existing session')
   .action(runCommand);
 
 program.parse();

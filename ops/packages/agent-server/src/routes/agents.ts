@@ -1,15 +1,17 @@
 import { Hono } from 'hono';
-import { stream } from 'hono/streaming';
 import { z } from 'zod';
-import { AgentRunner, type AgentType } from '../services/AgentRunner';
-import { logger } from '../config';
-import type { RunAgentRequest, AgentTypeInfo, ListAgentsResponse } from 'ops-shared';
+import { SessionService } from '../services/SessionService.js';
+import { JournalService } from '../services/JournalService.js';
+import { executeAgentWithJournal, type AgentType } from './agentExecutor.js';
+import { logger } from '../config.js';
+import type { AgentTypeInfo, ListAgentsResponse } from 'ops-shared';
 
 const app = new Hono();
 
 // Request validation schema
 const runAgentSchema = z.object({
   task: z.string().min(1, 'Task cannot be empty'),
+  sessionId: z.string().uuid().optional(),
   config: z
     .object({
       maxSteps: z.number().optional(),
@@ -22,75 +24,68 @@ const runAgentSchema = z.object({
 /**
  * POST /agents/:type/run
  *
- * Start agent execution with Server-Sent Events streaming
+ * Start agent execution with journal-based output.
+ * Returns runId and sessionId immediately, client subscribes via /runs/:runId/subscribe
  */
 app.post('/:type/run', async (c) => {
   const agentType = c.req.param('type') as AgentType;
 
   // Validate agent type
-  const validTypes: AgentType[] = ['coding', 'log-analyzer', 'orchestration'];
+  const validTypes: AgentType[] = ['coding', 'log-analyzer', 'orchestration', 'mock'];
   if (!validTypes.includes(agentType)) {
     return c.json({ error: 'Invalid agent type', validTypes }, 400);
   }
 
   // Parse and validate request body
-  let body: RunAgentRequest;
+  let body: unknown;
   try {
     body = await c.req.json();
-    const validation = runAgentSchema.safeParse(body);
-
-    if (!validation.success) {
-      return c.json(
-        {
-          error: 'Invalid request',
-          details: validation.error.errors,
-        },
-        400
-      );
-    }
-  } catch (error) {
+  } catch {
     return c.json({ error: 'Invalid JSON in request body' }, 400);
   }
 
-  const { task, config } = body;
+  const validation = runAgentSchema.safeParse(body);
+  if (!validation.success) {
+    return c.json(
+      {
+        error: 'Invalid request',
+        details: validation.error.errors,
+      },
+      400
+    );
+  }
 
-  logger.info({ agentType, task }, 'Starting agent execution');
+  const { task, sessionId: existingSessionId, config } = validation.data;
 
-  // Stream response using SSE
-  return stream(c, async (stream) => {
-    try {
-      const runner = new AgentRunner(agentType, config);
+  const sessionService = new SessionService();
+  const journalService = new JournalService();
 
-      // Subscribe to agent events and write to SSE stream
-      runner.on('event', (event) => {
-        stream.writeln(`data: ${JSON.stringify(event)}`);
-      });
+  // Create or use existing session
+  let sessionId = existingSessionId;
+  if (!sessionId) {
+    sessionId = await sessionService.createSession(agentType);
+    logger.info({ sessionId, agentType }, 'New session created');
+  }
 
-      // Run agent
-      const result = await runner.run(task);
+  // Create run record
+  const runId = await journalService.createRun(sessionId, agentType, task, config);
 
-      // Send final result
-      await stream.writeln(
-        `data: ${JSON.stringify({
-          type: 'agent:complete',
-          result,
-          timestamp: Date.now(),
-        })}`
-      );
+  logger.info({ runId, sessionId, agentType, task }, 'Starting agent execution');
 
-      logger.info({ agentType, task, success: result.success }, 'Agent execution completed');
-    } catch (error: any) {
-      logger.error({ agentType, task, error: error.message }, 'Agent execution failed');
-
-      await stream.writeln(
-        `data: ${JSON.stringify({
-          type: 'agent:error',
-          error: error.message,
-          timestamp: Date.now(),
-        })}`
-      );
-    }
+  // Start agent execution in background
+  executeAgentWithJournal(runId, agentType, task, sessionId, config).catch((error) => {
+    logger.error({ error: error.message, runId }, 'Background agent execution failed');
   });
+
+  // Return immediately with run info (HTTP 202 Accepted)
+  return c.json(
+    {
+      runId,
+      sessionId,
+      subscribeUrl: `/runs/${runId}/subscribe`,
+    },
+    202
+  );
 });
 
 /**

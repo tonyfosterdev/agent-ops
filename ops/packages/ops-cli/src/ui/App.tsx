@@ -35,15 +35,42 @@ export function App() {
   const [currentRunKey, setCurrentRunKey] = useState<number>(0);
   // Accumulator for streaming text chunks
   const [streamingText, setStreamingText] = useState<string>('');
+  // Session management
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   const handleSubmit = () => {
-    if (task.trim() && !isRunning) {
-      // Add the task to output history
-      setOutputHistory(prev => [...prev, { type: 'task', content: task.trim() }]);
-      setIsRunning(true);
-      setCurrentRunKey(prev => prev + 1);
-      setStreamingText('');
+    const trimmedTask = task.trim();
+
+    if (!trimmedTask || isRunning) return;
+
+    // Handle special commands
+    if (trimmedTask === '/new') {
+      setSessionId(null);
+      setTask('');
+      setOutputHistory((prev) => [
+        ...prev,
+        { type: 'text', content: 'Session reset. Next task starts a new session.' },
+      ]);
+      return;
     }
+
+    if (trimmedTask === '/session') {
+      setTask('');
+      setOutputHistory((prev) => [
+        ...prev,
+        {
+          type: 'text',
+          content: sessionId ? `Current session: ${sessionId}` : 'No active session',
+        },
+      ]);
+      return;
+    }
+
+    // Regular task - add to output and run
+    setOutputHistory((prev) => [...prev, { type: 'task', content: trimmedTask }]);
+    setIsRunning(true);
+    setCurrentRunKey((prev) => prev + 1);
+    setStreamingText('');
   };
 
   const handleAgentOutput = (item: OutputItem) => {
@@ -79,17 +106,22 @@ export function App() {
     }
   };
 
-  const handleAgentComplete = () => {
+  const handleAgentComplete = (newSessionId: string | null) => {
+    // Update session ID from the completed run
+    if (newSessionId) {
+      setSessionId(newSessionId);
+    }
+
     // Flush any remaining streaming text
-    setStreamingText(prev => {
+    setStreamingText((prev) => {
       if (prev.trim()) {
-        setOutputHistory(history => [...history, { type: 'text', content: prev.trim() }]);
+        setOutputHistory((history) => [...history, { type: 'text', content: prev.trim() }]);
       }
       return '';
     });
 
     // Only add complete if we haven't already
-    setOutputHistory(prev => {
+    setOutputHistory((prev) => {
       const lastItem = prev[prev.length - 1];
       if (lastItem?.type === 'complete') {
         return prev; // Already have complete, don't add another
@@ -134,7 +166,8 @@ export function App() {
       {isRunning && (
         <AgentRunner
           key={currentRunKey}
-          task={outputHistory.filter(o => o.type === 'task').pop()?.content || ''}
+          task={outputHistory.filter((o) => o.type === 'task').pop()?.content || ''}
+          sessionId={sessionId}
           onOutput={handleAgentOutput}
           onComplete={handleAgentComplete}
         />

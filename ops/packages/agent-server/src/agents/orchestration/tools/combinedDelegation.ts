@@ -7,6 +7,7 @@ import { tool } from 'ai';
 import { loadConfig } from 'ops-shared/config';
 import { createCodingAgent } from '../../coding';
 import { createLogAnalyzerAgent } from '../../log-analyzer';
+import { NoOpOutputSink } from '../../../sinks/NoOpOutputSink.js';
 import type { AgentResult } from 'ops-shared/types';
 
 /**
@@ -20,6 +21,9 @@ export const runBothAgentsSchema = z.object({
     .describe('Run agents in sequence (when dependent) or parallel (when independent)'),
 });
 
+// Empty context for delegated runs (no session history)
+const emptyContext = { summary: null, recentMessages: [] };
+
 /**
  * Create the combined delegation tool
  */
@@ -30,16 +34,18 @@ export function createRunBothAgentsTool() {
     parameters: runBothAgentsSchema,
     execute: async ({ codingTask, logAnalysisTask, executionMode }) => {
       try {
+        const sink = new NoOpOutputSink();
+
         if (executionMode === 'sequential') {
           // Run coding agent first, then log analyzer
           const codingConfig = loadConfig('coding');
           const codingAgent = await createCodingAgent(codingConfig);
-          const codingResult: AgentResult = await codingAgent.run(codingTask);
+          const codingResult: AgentResult = await codingAgent.run(codingTask, emptyContext, sink);
           await codingAgent.shutdown();
 
           const logConfig = loadConfig('log-analyzer');
           const logAgent = await createLogAnalyzerAgent(logConfig);
-          const logResult: AgentResult = await logAgent.run(logAnalysisTask);
+          const logResult: AgentResult = await logAgent.run(logAnalysisTask, emptyContext, sink);
           await logAgent.shutdown();
 
           // Combine results
@@ -61,14 +67,14 @@ export function createRunBothAgentsTool() {
             (async () => {
               const config = loadConfig('coding');
               const agent = await createCodingAgent(config);
-              const result = await agent.run(codingTask);
+              const result = await agent.run(codingTask, emptyContext, sink);
               await agent.shutdown();
               return result;
             })(),
             (async () => {
               const config = loadConfig('log-analyzer');
               const agent = await createLogAnalyzerAgent(config);
-              const result = await agent.run(logAnalysisTask);
+              const result = await agent.run(logAnalysisTask, emptyContext, sink);
               await agent.shutdown();
               return result;
             })(),

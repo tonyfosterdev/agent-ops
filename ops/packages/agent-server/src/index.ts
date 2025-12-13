@@ -1,9 +1,14 @@
+import 'reflect-metadata';
 import { serve } from '@hono/node-server';
-import { config, logger } from './config';
-import { createApp } from './app';
+import { config, logger } from './config.js';
+import { createApp } from './app.js';
+import { initializeDatabase } from './database.js';
 
 async function main() {
   try {
+    // Initialize database connection
+    await initializeDatabase();
+
     // Create Hono app
     const app = createApp();
     const port = config.port;

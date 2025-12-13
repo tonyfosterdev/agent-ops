@@ -1,26 +1,21 @@
 /**
  * Abstract base class for all agents
  *
- * Provides common lifecycle management, configuration, error handling,
- * and event emission for all agents.
+ * Provides common lifecycle management, configuration, and logging.
  */
 
 import { anthropic } from '@ai-sdk/anthropic';
 import type { LanguageModelV1 } from 'ai';
 import type { AgentConfig, AgentResult } from '../types';
-import { AgentEventEmitter } from '../events/AgentEventEmitter';
-import type { AgentEvent, AgentEventType } from '../events/types';
 
 export abstract class BaseAgent {
   protected config: AgentConfig;
   protected model: LanguageModelV1;
   protected isInitialized: boolean = false;
-  protected eventEmitter: AgentEventEmitter;
 
   constructor(config: AgentConfig) {
     this.config = config;
     this.model = anthropic(config.model);
-    this.eventEmitter = new AgentEventEmitter(config.agentType);
   }
 
   /**
@@ -28,14 +23,6 @@ export abstract class BaseAgent {
    * Must be called before run()
    */
   abstract initialize(): Promise<void>;
-
-  /**
-   * Run the agent with a given task
-   *
-   * @param task - The task description/prompt
-   * @returns AgentResult with success status, message, steps, and trace
-   */
-  abstract run(task: string): Promise<AgentResult>;
 
   /**
    * Cleanup resources (close connections, etc.)
@@ -83,26 +70,5 @@ export abstract class BaseAgent {
    */
   getConfig(): AgentConfig {
     return { ...this.config };
-  }
-
-  /**
-   * Get event emitter for external listeners
-   * Allows UI layer to subscribe to agent events
-   */
-  getEventEmitter(): AgentEventEmitter {
-    return this.eventEmitter;
-  }
-
-  /**
-   * Emit an agent event
-   * Helper method that automatically fills in common fields
-   */
-  protected emitEvent(event: Partial<AgentEvent> & { type: AgentEventType }): void {
-    this.eventEmitter.emitAgentEvent({
-      ...event,
-      agentId: this.eventEmitter.getAgentId(),
-      timestamp: Date.now(),
-      agentType: this.config.agentType,
-    } as AgentEvent);
   }
 }
