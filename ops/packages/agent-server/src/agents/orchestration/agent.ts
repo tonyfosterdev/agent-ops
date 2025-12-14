@@ -17,7 +17,7 @@ import {
   createRunBothAgentsTool,
 } from './tools/index.js';
 import { getSystemPrompt } from './prompts.js';
-import type { OutputSink } from '../../sinks/OutputSink.js';
+import type { Journal } from '../../interfaces/Journal.js';
 import type { ConversationContext } from '../../services/ContextService.js';
 
 export class OrchestrationAgent extends BaseAgent {
@@ -49,21 +49,25 @@ export class OrchestrationAgent extends BaseAgent {
    *
    * @param task - The task description (e.g., "Fix the auth bug and check logs for errors")
    * @param context - Conversation context from previous runs
-   * @param sink - Output sink for writing execution progress
+   * @param journal - Journal for writing execution progress (null for no journaling)
+   * @param runId - Run ID for journal entries (null for no journaling)
    * @returns AgentResult with execution results
    */
   async run(
     task: string,
     context: ConversationContext,
-    sink: OutputSink
+    journal: Journal | null,
+    runId: string | null
   ): Promise<AgentResult> {
     this.ensureInitialized();
 
-    await sink.writeRunStarted({
-      task,
-      maxSteps: this.config.maxSteps,
-      agentType: this.config.agentType,
-    });
+    if (journal && runId) {
+      await journal.writeEntry(runId, 'run:started', {
+        task,
+        maxSteps: this.config.maxSteps,
+        agentType: this.config.agentType,
+      });
+    }
 
     // Build system prompt with context
     let systemPrompt = getSystemPrompt();
@@ -95,8 +99,8 @@ export class OrchestrationAgent extends BaseAgent {
           currentStepNumber++;
 
           // Write text entry if there's text
-          if (text) {
-            await sink.writeText(text, currentStepNumber);
+          if (text && journal && runId) {
+            await journal.writeEntry(runId, 'text', { text }, currentStepNumber);
           }
 
           // Write tool entries
@@ -104,12 +108,14 @@ export class OrchestrationAgent extends BaseAgent {
             const call = toolCalls[i];
             const toolResult = toolResults[i];
 
-            await sink.writeToolStarting(
-              call.toolName,
-              call.toolCallId,
-              call.args,
-              currentStepNumber
-            );
+            if (journal && runId) {
+              await journal.writeEntry(
+                runId,
+                'tool:starting',
+                { toolName: call.toolName, toolCallId: call.toolCallId, args: call.args },
+                currentStepNumber
+              );
+            }
 
             const resultData = toolResult?.result as any;
             const success = resultData?.success || false;
@@ -119,17 +125,25 @@ export class OrchestrationAgent extends BaseAgent {
               result: resultData,
             });
 
-            await sink.writeToolComplete(
-              call.toolName,
-              call.toolCallId,
-              resultData,
-              success,
-              summary,
-              currentStepNumber
-            );
+            if (journal && runId) {
+              await journal.writeEntry(
+                runId,
+                'tool:complete',
+                {
+                  toolName: call.toolName,
+                  toolCallId: call.toolCallId,
+                  result: resultData,
+                  success,
+                  summary,
+                },
+                currentStepNumber
+              );
+            }
           }
 
-          await sink.writeStepComplete(currentStepNumber);
+          if (journal && runId) {
+            await journal.writeEntry(runId, 'step:complete', {}, currentStepNumber);
+          }
         },
       });
 
@@ -149,15 +163,21 @@ export class OrchestrationAgent extends BaseAgent {
         trace: [],
       };
 
-      await sink.writeRunComplete({
-        success,
-        message: finalText,
-        steps: stepsUsed,
-      });
+      if (journal && runId) {
+        await journal.writeEntry(runId, 'run:complete', {
+          success,
+          message: finalText,
+          steps: stepsUsed,
+        });
+        await journal.completeRun(runId, { success, message: finalText });
+      }
 
       return agentResult;
     } catch (error: any) {
-      await sink.writeRunError(error.message);
+      if (journal && runId) {
+        await journal.writeEntry(runId, 'run:error', { error: error.message });
+        await journal.failRun(runId, error.message);
+      }
 
       return {
         success: false,

@@ -7,7 +7,6 @@ import agentRoutes from './routes/agents.js';
 import healthRoutes from './routes/health.js';
 import sessionRoutes from './routes/sessions.js';
 import runRoutes from './routes/runs.js';
-import approvalRoutes from './routes/approvals.js';
 
 export function createApp() {
   const app = new Hono();
@@ -28,7 +27,6 @@ export function createApp() {
   app.route('/agents', agentRoutes);
   app.route('/sessions', sessionRoutes);
   app.route('/runs', runRoutes);
-  app.route('/runs', approvalRoutes); // Approval routes under /runs
 
   return app;
 }

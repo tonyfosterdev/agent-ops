@@ -2,9 +2,11 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { SessionService } from '../services/SessionService.js';
 import { JournalService } from '../services/JournalService.js';
-import { executeAgentWithJournal, type AgentType } from './agentExecutor.js';
+import { agentRunner } from '../services/AgentRunner.js';
 import { logger } from '../config.js';
 import type { AgentTypeInfo, ListAgentsResponse } from 'ops-shared';
+
+type AgentType = 'coding' | 'log-analyzer' | 'orchestration' | 'mock';
 
 const app = new Hono();
 
@@ -72,9 +74,9 @@ app.post('/:type/run', async (c) => {
 
   logger.info({ runId, sessionId, agentType, task }, 'Starting agent execution');
 
-  // Start agent execution in background
-  executeAgentWithJournal(runId, agentType, task, sessionId, config).catch((error) => {
-    logger.error({ error: error.message, runId }, 'Background agent execution failed');
+  // Start agent execution in background using new state machine runner
+  agentRunner.start(runId).catch((error) => {
+    logger.error({ error: error.message, runId }, 'Agent execution failed');
   });
 
   // Return immediately with run info (HTTP 202 Accepted)

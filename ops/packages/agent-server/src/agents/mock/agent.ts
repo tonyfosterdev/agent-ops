@@ -1,11 +1,11 @@
 /**
  * Mock Agent for Testing
  *
- * A simple agent that writes predefined entries to the OutputSink
+ * A simple agent that writes predefined entries to the Journal
  * without calling the Claude API. Used for integration testing.
  */
 
-import type { OutputSink } from '../../sinks/OutputSink.js';
+import type { Journal } from '../../interfaces/Journal.js';
 import type { AgentResult } from 'ops-shared';
 import type { ConversationContext } from '../../services/ContextService.js';
 
@@ -68,7 +68,8 @@ export class MockAgent {
   async run(
     task: string,
     context: ConversationContext,
-    sink: OutputSink
+    journal: Journal | null,
+    runId: string | null
   ): Promise<AgentResult> {
     if (!this.isInitialized) {
       throw new Error('Agent not initialized. Call initialize() first.');
@@ -77,11 +78,13 @@ export class MockAgent {
     const steps = this.config.steps || DEFAULT_STEPS;
 
     // Write run started
-    await sink.writeRunStarted({
-      task,
-      maxSteps: this.config.maxSteps,
-      agentType: this.config.agentType,
-    });
+    if (journal && runId) {
+      await journal.writeEntry(runId, 'run:started', {
+        task,
+        maxSteps: this.config.maxSteps,
+        agentType: this.config.agentType,
+      });
+    }
 
     // Optional delay to simulate processing
     if (this.config.delayMs) {
@@ -100,37 +103,47 @@ export class MockAgent {
         }
 
         // Write text if present
-        if (step.text) {
-          await sink.writeText(step.text, stepNumber);
+        if (step.text && journal && runId) {
+          await journal.writeEntry(runId, 'text', { text: step.text }, stepNumber);
         }
 
         // Write tool execution if present
         if (step.tool) {
           const toolCallId = `mock-call-${stepNumber}`;
 
-          await sink.writeToolStarting(
-            step.tool.name,
-            toolCallId,
-            step.tool.args,
-            stepNumber
-          );
+          if (journal && runId) {
+            await journal.writeEntry(
+              runId,
+              'tool:starting',
+              { toolName: step.tool.name, toolCallId, args: step.tool.args },
+              stepNumber
+            );
+          }
 
           // Optional delay to simulate tool execution
           if (this.config.delayMs) {
             await this.delay(this.config.delayMs / 2);
           }
 
-          await sink.writeToolComplete(
-            step.tool.name,
-            toolCallId,
-            step.tool.result,
-            step.tool.success,
-            step.tool.summary,
-            stepNumber
-          );
+          if (journal && runId) {
+            await journal.writeEntry(
+              runId,
+              'tool:complete',
+              {
+                toolName: step.tool.name,
+                toolCallId,
+                result: step.tool.result,
+                success: step.tool.success,
+                summary: step.tool.summary,
+              },
+              stepNumber
+            );
+          }
         }
 
-        await sink.writeStepComplete(stepNumber);
+        if (journal && runId) {
+          await journal.writeEntry(runId, 'step:complete', {}, stepNumber);
+        }
       }
 
       // Check if we should fail at the end
@@ -140,11 +153,14 @@ export class MockAgent {
 
       const message = `Mock agent completed ${stepNumber} step(s) for task: ${task}`;
 
-      await sink.writeRunComplete({
-        success: true,
-        message,
-        steps: stepNumber,
-      });
+      if (journal && runId) {
+        await journal.writeEntry(runId, 'run:complete', {
+          success: true,
+          message,
+          steps: stepNumber,
+        });
+        await journal.completeRun(runId, { success: true, message });
+      }
 
       return {
         success: true,
@@ -153,7 +169,10 @@ export class MockAgent {
         trace: [], // Empty trace for mock agent
       };
     } catch (error: any) {
-      await sink.writeRunError(error.message);
+      if (journal && runId) {
+        await journal.writeEntry(runId, 'run:error', { error: error.message });
+        await journal.failRun(runId, error.message);
+      }
 
       return {
         success: false,

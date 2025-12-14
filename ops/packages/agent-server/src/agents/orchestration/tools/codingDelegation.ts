@@ -6,7 +6,6 @@ import { z } from 'zod';
 import { tool } from 'ai';
 import { loadConfig, getPathMappingConfig, translateDockerPaths } from 'ops-shared';
 import { createCodingAgent } from '../../coding';
-import { NoOpOutputSink } from '../../../sinks/NoOpOutputSink.js';
 import type { AgentResult } from 'ops-shared/types';
 
 /**
@@ -17,7 +16,7 @@ export const runCodingAgentSchema = z.object({
 });
 
 // Empty context for delegated runs (no session history)
-const emptyContext = { summary: null, recentMessages: [] };
+const emptyContext = { summary: '', recentMessages: [] };
 
 /**
  * Create the coding agent delegation tool
@@ -39,11 +38,8 @@ export function createRunCodingAgentTool() {
         // Create and initialize coding agent
         const agent = await createCodingAgent(config);
 
-        // Create no-op sink (output captured in return value)
-        const sink = new NoOpOutputSink();
-
-        // Run task with translated paths
-        const result: AgentResult = await agent.run(translatedTask, emptyContext, sink);
+        // Run task with translated paths (no journaling for delegated runs)
+        const result: AgentResult = await agent.run(translatedTask, emptyContext, null, null);
 
         // Shutdown
         await agent.shutdown();

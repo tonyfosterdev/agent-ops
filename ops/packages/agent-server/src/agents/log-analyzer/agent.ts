@@ -3,6 +3,8 @@
  *
  * Extends BaseAgent to provide log querying, analysis, and reporting capabilities
  * for the distributed bookstore system using Grafana Loki.
+ * NOTE: This class is used by the old agentExecutor path.
+ * The new AgentRunner path uses getAgentConfig() directly.
  */
 
 import { generateText } from 'ai';
@@ -11,14 +13,8 @@ import type { AgentConfig, AgentResult } from 'ops-shared/types';
 import { getLokiConfig } from 'ops-shared/config';
 import { createLokiQueryTool, createLogAnalysisTool, createReportGenerationTool } from './tools/index.js';
 import { getSystemPrompt } from './prompts.js';
-import type { OutputSink } from '../../sinks/OutputSink.js';
+import type { Journal } from '../../interfaces/Journal.js';
 import type { ConversationContext } from '../../services/ContextService.js';
-import {
-  wrapToolsWithApproval,
-  setToolContext,
-  updateStepNumber,
-  generateToolCallId,
-} from '../../tools/HITMToolWrapper.js';
 
 export class LogAnalyzerAgent extends BaseAgent {
   private lokiQueryTool: any;
@@ -52,21 +48,25 @@ export class LogAnalyzerAgent extends BaseAgent {
    *
    * @param task - The investigation description (e.g., "Why is warehouse-alpha failing?")
    * @param context - Conversation context from previous runs
-   * @param sink - Output sink for writing execution progress
+   * @param journal - Journal for writing execution progress (null for no journaling)
+   * @param runId - Run ID for journal entries (null for no journaling)
    * @returns AgentResult with execution results
    */
   async run(
     task: string,
     context: ConversationContext,
-    sink: OutputSink
+    journal: Journal | null,
+    runId: string | null
   ): Promise<AgentResult> {
     this.ensureInitialized();
 
-    await sink.writeRunStarted({
-      task,
-      maxSteps: this.config.maxSteps,
-      agentType: this.config.agentType,
-    });
+    if (journal && runId) {
+      await journal.writeEntry(runId, 'run:started', {
+        task,
+        maxSteps: this.config.maxSteps,
+        agentType: this.config.agentType,
+      });
+    }
 
     // Build system prompt with context
     let systemPrompt = getSystemPrompt();
@@ -84,35 +84,25 @@ export class LogAnalyzerAgent extends BaseAgent {
     try {
       let currentStepNumber = 0;
 
-      // Wrap tools with HITM approval
-      const rawTools = {
+      // Tools for log analyzer agent
+      const tools = {
         loki_query: this.lokiQueryTool,
         analyze_logs: this.logAnalysisTool,
         generate_report: this.reportGenerationTool,
       };
-      const wrappedTools = wrapToolsWithApproval(rawTools);
-
-      // Set tool context for HITM approval
-      setToolContext({
-        sink,
-        stepNumber: currentStepNumber,
-        generateToolCallId,
-      });
 
       const result = await generateText({
         model: this.model,
         maxSteps: this.config.maxSteps,
         system: systemPrompt,
         messages,
-        tools: wrappedTools,
+        tools,
         onStepFinish: async ({ text, toolCalls, toolResults }) => {
           currentStepNumber++;
-          // Update step number in context for next tools
-          updateStepNumber(currentStepNumber);
 
           // Write text entry if there's text
-          if (text) {
-            await sink.writeText(text, currentStepNumber);
+          if (text && journal && runId) {
+            await journal.writeEntry(runId, 'text', { text }, currentStepNumber);
           }
 
           // Write tool entries
@@ -120,33 +110,40 @@ export class LogAnalyzerAgent extends BaseAgent {
             const call = toolCalls[i];
             const toolResult = toolResults[i];
 
-            await sink.writeToolStarting(
-              call.toolName,
-              call.toolCallId,
-              call.args,
-              currentStepNumber
-            );
+            if (journal && runId) {
+              await journal.writeEntry(
+                runId,
+                'tool:starting',
+                { toolName: call.toolName, toolCallId: call.toolCallId, args: call.args },
+                currentStepNumber
+              );
+            }
 
             const resultData = toolResult?.result as any;
             const success = resultData?.success !== false;
             const summary = this.generateToolSummary(call.toolName, resultData);
 
-            await sink.writeToolComplete(
-              call.toolName,
-              call.toolCallId,
-              resultData,
-              success,
-              summary,
-              currentStepNumber
-            );
+            if (journal && runId) {
+              await journal.writeEntry(
+                runId,
+                'tool:complete',
+                {
+                  toolName: call.toolName,
+                  toolCallId: call.toolCallId,
+                  result: resultData,
+                  success,
+                  summary,
+                },
+                currentStepNumber
+              );
+            }
           }
 
-          await sink.writeStepComplete(currentStepNumber);
+          if (journal && runId) {
+            await journal.writeEntry(runId, 'step:complete', {}, currentStepNumber);
+          }
         },
       });
-
-      // Clear tool context after execution
-      setToolContext(null);
 
       const finalText = result.text;
       const stepsUsed = result.steps?.length || 0;
@@ -168,17 +165,21 @@ export class LogAnalyzerAgent extends BaseAgent {
         trace: [],
       };
 
-      await sink.writeRunComplete({
-        success,
-        message: finalText,
-        steps: stepsUsed,
-      });
+      if (journal && runId) {
+        await journal.writeEntry(runId, 'run:complete', {
+          success,
+          message: finalText,
+          steps: stepsUsed,
+        });
+        await journal.completeRun(runId, { success, message: finalText });
+      }
 
       return agentResult;
     } catch (error: any) {
-      // Clear tool context on error
-      setToolContext(null);
-      await sink.writeRunError(error.message);
+      if (journal && runId) {
+        await journal.writeEntry(runId, 'run:error', { error: error.message });
+        await journal.failRun(runId, error.message);
+      }
 
       return {
         success: false,

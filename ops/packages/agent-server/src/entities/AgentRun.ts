@@ -11,7 +11,7 @@ import {
 import { Session } from './Session.js';
 import { JournalEntry } from './JournalEntry.js';
 
-export type RunStatus = 'running' | 'completed' | 'failed';
+export type RunStatus = 'pending' | 'running' | 'suspended' | 'completed' | 'failed';
 
 @Entity('agent_runs')
 export class AgentRun {
@@ -35,9 +35,22 @@ export class AgentRun {
   @Column({ type: 'text' })
   task!: string;
 
-  @Column({ type: 'varchar', length: 20, default: 'running' })
+  @Column({ type: 'varchar', length: 20, default: 'pending' })
   @Index()
   status!: RunStatus;
+
+  @Column({ type: 'int', default: 0 })
+  current_step!: number;
+
+  @Column({ type: 'jsonb', nullable: true })
+  messages?: any[];  // AI SDK message history
+
+  @Column({ type: 'jsonb', nullable: true })
+  pending_tool?: {
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+  };
 
   @Column({ type: 'jsonb', nullable: true })
   config?: Record<string, any>;

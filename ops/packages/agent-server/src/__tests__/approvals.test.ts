@@ -1,7 +1,8 @@
 /**
  * Approval System Tests
  *
- * Tests for the HITM (Human-in-the-Middle) approval system.
+ * Tests for the approval system with the new state machine approach.
+ * No longer uses blocking promises - approvals are simple DB operations.
  */
 
 import { TestServer } from './utils/TestServer.js';
@@ -42,10 +43,9 @@ describe('ApprovalService', () => {
     runId = run.id;
   });
 
-  describe('requestApproval', () => {
-    it('creates a pending approval in database and resolves on approve', async () => {
-      // Start approval request
-      const approvalPromise = approvalService.requestApproval({
+  describe('createApproval', () => {
+    it('creates a pending approval in database', async () => {
+      const approval = await approvalService.createApproval({
         runId,
         toolCallId: 'test-tool-1',
         toolName: 'read_file',
@@ -53,37 +53,17 @@ describe('ApprovalService', () => {
         stepNumber: 1,
       });
 
-      // Wait for the approval to be created in DB, then find and approve it
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const approval = await approvalService.getByToolCallId(runId, 'test-tool-1');
       expect(approval).toBeDefined();
-      expect(approval?.status).toBe('pending');
-
-      await approvalService.approve(approval!.id);
-
-      const result = await approvalPromise;
-      expect(result.status).toBe('approved');
-    });
-
-    it('returns timeout on long wait', async () => {
-      const result = await approvalService.requestApproval(
-        {
-          runId,
-          toolCallId: 'test-tool-timeout',
-          toolName: 'read_file',
-          args: { path: '/test/file.txt' },
-          stepNumber: 1,
-        },
-        100 // Short timeout for testing
-      );
-
-      expect(result.status).toBe('timeout');
+      expect(approval.run_id).toBe(runId);
+      expect(approval.tool_call_id).toBe('test-tool-1');
+      expect(approval.tool_name).toBe('read_file');
+      expect(approval.status).toBe('pending');
     });
   });
 
   describe('approve', () => {
     it('updates approval status to approved', async () => {
-      // Create a pending approval directly
+      // Create a pending approval
       const approvalRepo = TestDataSource.getRepository(ToolApproval);
       const approval = approvalRepo.create({
         run_id: runId,
@@ -93,21 +73,39 @@ describe('ApprovalService', () => {
         step_number: 1,
         status: 'pending',
       });
-      const saved = await approvalRepo.save(approval);
+      await approvalRepo.save(approval);
 
-      // approve() takes the approval ID, not runId/toolCallId
-      const result = await approvalService.approve(saved.id);
+      // Approve using runId and toolCallId
+      const result = await approvalService.approve(runId, 'test-tool-2');
       expect(result).toBe(true);
 
       const updated = await approvalRepo.findOne({
-        where: { id: saved.id },
+        where: { run_id: runId, tool_call_id: 'test-tool-2' },
       });
       expect(updated?.status).toBe('approved');
       expect(updated?.resolved_at).toBeDefined();
     });
 
     it('returns false for non-existent approval', async () => {
-      const result = await approvalService.approve('00000000-0000-0000-0000-000000000000');
+      const result = await approvalService.approve(runId, 'non-existent');
+      expect(result).toBe(false);
+    });
+
+    it('returns false for already resolved approval', async () => {
+      // Create an already approved approval
+      const approvalRepo = TestDataSource.getRepository(ToolApproval);
+      await approvalRepo.save({
+        run_id: runId,
+        tool_call_id: 'already-approved',
+        tool_name: 'read_file',
+        args: { path: '/test' },
+        step_number: 1,
+        status: 'approved',
+        resolved_at: new Date(),
+      });
+
+      // Try to approve again
+      const result = await approvalService.approve(runId, 'already-approved');
       expect(result).toBe(false);
     });
   });
@@ -115,7 +113,7 @@ describe('ApprovalService', () => {
   describe('reject', () => {
     it('updates approval status to rejected with reason', async () => {
       const approvalRepo = TestDataSource.getRepository(ToolApproval);
-      const approval = approvalRepo.create({
+      await approvalRepo.save({
         run_id: runId,
         tool_call_id: 'test-tool-3',
         tool_name: 'shell_command',
@@ -123,18 +121,21 @@ describe('ApprovalService', () => {
         step_number: 1,
         status: 'pending',
       });
-      const saved = await approvalRepo.save(approval);
 
-      // reject() takes the approval ID, not runId/toolCallId
-      const result = await approvalService.reject(saved.id, 'Dangerous command');
+      const result = await approvalService.reject(runId, 'test-tool-3', 'Dangerous command');
       expect(result).toBe(true);
 
       const updated = await approvalRepo.findOne({
-        where: { id: saved.id },
+        where: { run_id: runId, tool_call_id: 'test-tool-3' },
       });
       expect(updated?.status).toBe('rejected');
       expect(updated?.rejection_reason).toBe('Dangerous command');
       expect(updated?.resolved_at).toBeDefined();
+    });
+
+    it('returns false for non-existent approval', async () => {
+      const result = await approvalService.reject(runId, 'non-existent', 'reason');
+      expect(result).toBe(false);
     });
   });
 
@@ -160,6 +161,29 @@ describe('ApprovalService', () => {
       expect(pending).toBeNull();
     });
   });
+
+  describe('getByToolCallId', () => {
+    it('returns approval by run and tool call ID', async () => {
+      const approvalRepo = TestDataSource.getRepository(ToolApproval);
+      await approvalRepo.save({
+        run_id: runId,
+        tool_call_id: 'specific-tool',
+        tool_name: 'read_file',
+        args: { path: '/test' },
+        step_number: 1,
+        status: 'pending',
+      });
+
+      const approval = await approvalService.getByToolCallId(runId, 'specific-tool');
+      expect(approval).toBeDefined();
+      expect(approval?.tool_call_id).toBe('specific-tool');
+    });
+
+    it('returns null for non-existent tool call', async () => {
+      const approval = await approvalService.getByToolCallId(runId, 'non-existent');
+      expect(approval).toBeNull();
+    });
+  });
 });
 
 describe('Approval API', () => {
@@ -183,7 +207,7 @@ describe('Approval API', () => {
     const { runId: newRunId } = await client.startRun(sessionId, 'API Test');
     runId = newRunId;
 
-    // Wait for run to complete
+    // Wait for run to complete (mock agent is fast)
     await new Promise((resolve) => setTimeout(resolve, 200));
   });
 

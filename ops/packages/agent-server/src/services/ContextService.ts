@@ -1,6 +1,6 @@
 import { anthropic } from '@ai-sdk/anthropic';
 import { generateText } from 'ai';
-import { JournalService } from './JournalService.js';
+import type { Journal } from '../interfaces/Journal.js';
 import { AgentRun } from '../entities/AgentRun.js';
 import { logger } from '../config.js';
 
@@ -15,14 +15,14 @@ export interface ConversationContext {
 }
 
 export class ContextService {
-  private journalService: JournalService;
+  private journal: Journal;
 
-  constructor(journalService: JournalService) {
-    this.journalService = journalService;
+  constructor(journal: Journal) {
+    this.journal = journal;
   }
 
   async buildContext(sessionId: string): Promise<ConversationContext> {
-    const runs = await this.journalService.getRunsForSession(sessionId);
+    const runs = await this.journal.getRunsForSession(sessionId);
     const completedRuns = runs.filter((r) => r.status === 'completed');
 
     if (completedRuns.length === 0) {

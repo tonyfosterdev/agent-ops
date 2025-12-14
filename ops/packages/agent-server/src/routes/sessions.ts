@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { SessionService } from '../services/SessionService.js';
 import { JournalService } from '../services/JournalService.js';
 import { ContextService } from '../services/ContextService.js';
-import { executeAgentWithJournal, type AgentType } from './agentExecutor.js';
+import { agentRunner } from '../services/AgentRunner.js';
 import { logger } from '../config.js';
 
 const app = new Hono();
@@ -164,9 +164,9 @@ app.post('/:sessionId/runs', async (c) => {
 
   logger.info({ runId, sessionId, task }, 'Run created in session');
 
-  // Start agent execution in background
-  executeAgentWithJournal(runId, session.agent_type as AgentType, task, sessionId, config).catch((error) => {
-    logger.error({ error, runId }, 'Background agent execution failed');
+  // Start agent execution in background using new state machine runner
+  agentRunner.start(runId).catch((error) => {
+    logger.error({ error: error.message, runId }, 'Agent execution failed');
   });
 
   return c.json(

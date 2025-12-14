@@ -4,11 +4,9 @@
  * Tests for conversation context building from session history.
  */
 
-import { TestDataSource } from './setup.js';
 import { JournalService } from '../services/JournalService.js';
 import { ContextService } from '../services/ContextService.js';
 import { SessionService } from '../services/SessionService.js';
-import { JournalOutputSink } from '../sinks/JournalOutputSink.js';
 
 describe('Context Building', () => {
   let journalService: JournalService;
@@ -32,25 +30,42 @@ describe('Context Building', () => {
     toolSummary?: string
   ): Promise<string> {
     const runId = await journalService.createRun(sessionId, 'mock', task);
-    const sink = new JournalOutputSink(runId, journalService);
 
-    await sink.writeRunStarted({ task, maxSteps: 10, agentType: 'mock' });
-    await sink.writeText(textContent, 1);
+    await journalService.writeEntry(runId, 'run:started', {
+      task,
+      maxSteps: 10,
+      agentType: 'mock',
+    });
+    await journalService.writeEntry(runId, 'text', { text: textContent }, 1);
 
     if (toolSummary) {
-      await sink.writeToolStarting('mockTool', 'call-1', { input: 'test' }, 1);
-      await sink.writeToolComplete(
-        'mockTool',
-        'call-1',
-        { result: 'done' },
-        true,
-        toolSummary,
+      await journalService.writeEntry(
+        runId,
+        'tool:starting',
+        { toolName: 'mockTool', toolCallId: 'call-1', args: { input: 'test' } },
+        1
+      );
+      await journalService.writeEntry(
+        runId,
+        'tool:complete',
+        {
+          toolName: 'mockTool',
+          toolCallId: 'call-1',
+          result: { result: 'done' },
+          success: true,
+          summary: toolSummary,
+        },
         1
       );
     }
 
-    await sink.writeStepComplete(1);
-    await sink.writeRunComplete({ success: true, message: 'Done', steps: 1 });
+    await journalService.writeEntry(runId, 'step:complete', {}, 1);
+    await journalService.writeEntry(runId, 'run:complete', {
+      success: true,
+      message: 'Done',
+      steps: 1,
+    });
+    await journalService.completeRun(runId, { success: true, message: 'Done' });
 
     return runId;
   }
@@ -60,11 +75,15 @@ describe('Context Building', () => {
    */
   async function createFailedRun(sessionId: string, task: string): Promise<string> {
     const runId = await journalService.createRun(sessionId, 'mock', task);
-    const sink = new JournalOutputSink(runId, journalService);
 
-    await sink.writeRunStarted({ task, maxSteps: 10, agentType: 'mock' });
-    await sink.writeText('Starting...', 1);
-    await sink.writeRunError('Simulated failure');
+    await journalService.writeEntry(runId, 'run:started', {
+      task,
+      maxSteps: 10,
+      agentType: 'mock',
+    });
+    await journalService.writeEntry(runId, 'text', { text: 'Starting...' }, 1);
+    await journalService.writeEntry(runId, 'run:error', { error: 'Simulated failure' });
+    await journalService.failRun(runId, 'Simulated failure');
 
     return runId;
   }
@@ -137,12 +156,7 @@ describe('Context Building', () => {
   it('includes only text, tool:complete summary, and run:complete in assistant message', async () => {
     const sessionId = await sessionService.createSession('mock');
 
-    await createCompletedRun(
-      sessionId,
-      'Task with tool',
-      'Agent text output',
-      'Tool result summary'
-    );
+    await createCompletedRun(sessionId, 'Task with tool', 'Agent text output', 'Tool result summary');
 
     const context = await contextService.buildContext(sessionId);
 
@@ -157,29 +171,6 @@ describe('Context Building', () => {
     expect(assistantMessage?.content).toContain('Tool result summary');
   });
 
-  it('excludes thinking entries from context', async () => {
-    const sessionId = await sessionService.createSession('mock');
-
-    // Create run with thinking entry
-    const runId = await journalService.createRun(sessionId, 'mock', 'Task');
-    const sink = new JournalOutputSink(runId, journalService);
-
-    await sink.writeRunStarted({ task: 'Task', maxSteps: 10, agentType: 'mock' });
-    await sink.writeThinking(1000); // Write thinking entry
-    await sink.writeText('Final response', 1);
-    await sink.writeStepComplete(1);
-    await sink.writeRunComplete({ success: true, message: 'Done', steps: 1 });
-
-    const context = await contextService.buildContext(sessionId);
-
-    const assistantMessage = context.recentMessages.find((m) => m.role === 'assistant');
-
-    // Should contain text but NOT any thinking indicators
-    expect(assistantMessage?.content).toContain('Final response');
-    expect(assistantMessage?.content).not.toContain('thinking');
-    expect(assistantMessage?.content).not.toContain('1000');
-  });
-
   it('excludes running runs from context', async () => {
     const sessionId = await sessionService.createSession('mock');
 
@@ -188,9 +179,12 @@ describe('Context Building', () => {
 
     // Create a running run (don't complete it)
     const runId = await journalService.createRun(sessionId, 'mock', 'Running task');
-    const sink = new JournalOutputSink(runId, journalService);
-    await sink.writeRunStarted({ task: 'Running task', maxSteps: 10, agentType: 'mock' });
-    // Don't call writeRunComplete
+    await journalService.writeEntry(runId, 'run:started', {
+      task: 'Running task',
+      maxSteps: 10,
+      agentType: 'mock',
+    });
+    // Don't call completeRun
 
     const context = await contextService.buildContext(sessionId);
 

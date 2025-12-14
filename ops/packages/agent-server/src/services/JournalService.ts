@@ -2,8 +2,9 @@ import { MoreThan } from 'typeorm';
 import { AppDataSource } from '../database.js';
 import { AgentRun } from '../entities/AgentRun.js';
 import { JournalEntry } from '../entities/JournalEntry.js';
+import type { Journal } from '../interfaces/Journal.js';
 
-export class JournalService {
+export class JournalService implements Journal {
   private runRepository = AppDataSource.getRepository(AgentRun);
   private entryRepository = AppDataSource.getRepository(JournalEntry);
 
