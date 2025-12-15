@@ -48,6 +48,7 @@ app.post('/:type/run', async (c) => {
 
   const validation = runAgentSchema.safeParse(body);
   if (!validation.success) {
+    logger.warn({ body, errors: validation.error.errors }, 'Request validation failed');
     return c.json(
       {
         error: 'Invalid request',

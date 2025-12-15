@@ -14,7 +14,6 @@ import type { AgentConfig, AgentResult } from 'ops-shared/types';
 import {
   createRunCodingAgentTool,
   createRunLogAnalyzerAgentTool,
-  createRunBothAgentsTool,
 } from './tools/index.js';
 import { getSystemPrompt } from './prompts.js';
 import type { Journal } from '../../interfaces/Journal.js';
@@ -23,7 +22,6 @@ import type { ConversationContext } from '../../services/ContextService.js';
 export class OrchestrationAgent extends BaseAgent {
   private runCodingAgentTool: any;
   private runLogAnalyzerAgentTool: any;
-  private runBothAgentsTool: any;
 
   constructor(config: AgentConfig) {
     super(config);
@@ -38,7 +36,6 @@ export class OrchestrationAgent extends BaseAgent {
     // Create delegation tools
     this.runCodingAgentTool = createRunCodingAgentTool();
     this.runLogAnalyzerAgentTool = createRunLogAnalyzerAgentTool();
-    this.runBothAgentsTool = createRunBothAgentsTool();
 
     this.isInitialized = true;
     this.log('info', 'Orchestration Agent initialized successfully');
@@ -93,7 +90,6 @@ export class OrchestrationAgent extends BaseAgent {
         tools: {
           run_coding_agent: this.runCodingAgentTool,
           run_log_analyzer_agent: this.runLogAnalyzerAgentTool,
-          run_both_agents: this.runBothAgentsTool,
         },
         onStepFinish: async ({ text, toolCalls, toolResults }) => {
           currentStepNumber++;
@@ -204,9 +200,6 @@ export class OrchestrationAgent extends BaseAgent {
       case 'run_log_analyzer_agent':
         const logTask = args.task || '';
         return `Log analyzer: ${result.success ? 'Completed' : 'Failed'} - ${logTask.slice(0, 50)}${logTask.length > 50 ? '...' : ''}`;
-
-      case 'run_both_agents':
-        return `Both agents executed ${result.executionMode || 'unknown'} - ${result.success ? 'Success' : 'Failed'}`;
 
       default:
         return `Executed ${toolName}`;

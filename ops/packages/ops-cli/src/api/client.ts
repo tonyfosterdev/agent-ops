@@ -89,17 +89,22 @@ export class AgentClient extends EventEmitter {
     task: string,
     options: { maxSteps?: number; model?: string } = {}
   ): Promise<RunInfo> {
+    const requestBody: Record<string, unknown> = {
+      task,
+      config: options,
+    };
+    // Only include sessionId if it's set (not null/undefined)
+    if (this.sessionId) {
+      requestBody.sessionId = this.sessionId;
+    }
+
     const response = await fetch(`${this.serverUrl}/agents/${agentType}/run`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: this.getAuthHeader(),
       },
-      body: JSON.stringify({
-        task,
-        sessionId: this.sessionId,
-        config: options,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {

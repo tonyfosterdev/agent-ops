@@ -32,6 +32,12 @@ import {
 import { getSystemPrompt as getLogAnalyzerPrompt } from '../agents/log-analyzer/prompts.js';
 import { getLokiConfig } from 'ops-shared/config';
 
+import {
+  createRunCodingAgentTool,
+  createRunLogAnalyzerAgentTool,
+} from '../agents/orchestration/tools/index.js';
+import { getSystemPrompt as getOrchestrationPrompt } from '../agents/orchestration/prompts.js';
+
 /**
  * Tools that are safe to execute without human approval (read-only)
  */
@@ -41,7 +47,36 @@ const SAFE_TOOLS = new Set([
   'search_code',
   'loki_query',
   'analyze_logs',
+  // Note: write_file, shell_command_execute, and orchestration delegation tools
+  // require HITM approval before execution.
 ]);
+
+/**
+ * Create a version of a tool without the execute function.
+ * This allows the AI to call the tool, but execution is handled manually.
+ */
+function stripExecute(toolDef: any): any {
+  // Return a new tool definition without the execute property
+  const { execute, ...rest } = toolDef;
+  return rest;
+}
+
+/**
+ * Prepare tools for generateText - safe tools keep execute, dangerous tools have it stripped
+ */
+function prepareToolsForGeneration(tools: Record<string, any>): Record<string, any> {
+  const prepared: Record<string, any> = {};
+  for (const [name, tool] of Object.entries(tools)) {
+    if (SAFE_TOOLS.has(name)) {
+      // Safe tool - keep execute function for auto-execution
+      prepared[name] = tool;
+    } else {
+      // Dangerous tool - strip execute to prevent auto-execution
+      prepared[name] = stripExecute(tool);
+    }
+  }
+  return prepared;
+}
 
 /**
  * Result from executing a single step
@@ -211,6 +246,10 @@ export class AgentRunner {
 
     const { model, systemPrompt, tools } = agentConfig;
 
+    // Prepare tools for generation - dangerous tools have execute stripped
+    // so they won't auto-execute. Safe tools keep execute for auto-execution.
+    const preparedTools = prepareToolsForGeneration(tools);
+
     // Build initial messages if none exist
     let messages = run.messages;
     if (!messages || messages.length === 0) {
@@ -241,7 +280,7 @@ export class AgentRunner {
       maxSteps: 1,  // KEY: Single step only
       system: systemPrompt,
       messages,
-      tools,
+      tools: preparedTools,  // Use prepared tools (dangerous ones won't auto-execute)
     });
 
     // Write text output
@@ -255,7 +294,8 @@ export class AgentRunner {
     const toolCalls = result.toolCalls || [];
     for (const call of toolCalls) {
       if (!SAFE_TOOLS.has(call.toolName)) {
-        // Dangerous tool - create approval request and suspend
+        // Dangerous tool - was NOT auto-executed (no execute function)
+        // Create approval request and suspend
         await this.createApprovalRequest(run, call);
 
         // Write pending approval entry
@@ -504,6 +544,16 @@ export class AgentRunner {
           },
         };
       }
+
+      case 'orchestration':
+        return {
+          model,
+          systemPrompt: getOrchestrationPrompt(),
+          tools: {
+            run_coding_agent: createRunCodingAgentTool(),
+            run_log_analyzer_agent: createRunLogAnalyzerAgentTool(),
+          },
+        };
 
       default:
         return null;
