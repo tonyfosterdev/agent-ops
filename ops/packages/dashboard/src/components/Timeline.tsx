@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, ReactNode } from 'react';
 import type { JournalEvent, PendingTool } from '../types/journal';
 
 interface TimelineProps {
@@ -129,6 +129,43 @@ function InlineApproval({
   );
 }
 
+function RawEventToggle({ event }: { event: JournalEvent }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div className="mt-2">
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 transition-colors"
+      >
+        <svg
+          className={`w-3 h-3 transition-transform ${isOpen ? 'rotate-90' : ''}`}
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
+        <span className="font-mono">raw</span>
+      </button>
+      {isOpen && (
+        <pre className="mt-2 bg-gray-950 rounded p-3 text-xs text-gray-400 overflow-x-auto border border-gray-800 max-h-64">
+          {JSON.stringify(event, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function EntryWrapper({ children, event }: { children: ReactNode; event: JournalEvent }) {
+  return (
+    <div>
+      {children}
+      <RawEventToggle event={event} />
+    </div>
+  );
+}
+
 function TimelineEntry({ event }: { event: JournalEvent }) {
   const timestamp = new Date(event.created_at).toLocaleTimeString();
 
@@ -136,34 +173,38 @@ function TimelineEntry({ event }: { event: JournalEvent }) {
     case 'RUN_STARTED': {
       const payload = event.payload as { prompt: string; user_id: string };
       return (
-        <div className="border-l-4 border-green-500 pl-4 py-2">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span className="bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs">
-              RUN STARTED
-            </span>
+        <EntryWrapper event={event}>
+          <div className="border-l-4 border-green-500 pl-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span className="bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs">
+                RUN STARTED
+              </span>
+            </div>
+            <div className="mt-1 text-gray-300">
+              <strong className="text-gray-200">Prompt:</strong> {payload.prompt}
+            </div>
           </div>
-          <div className="mt-1 text-gray-300">
-            <strong className="text-gray-200">Prompt:</strong> {payload.prompt}
-          </div>
-        </div>
+        </EntryWrapper>
       );
     }
 
     case 'AGENT_THOUGHT': {
       const payload = event.payload as { text_content: string };
       return (
-        <div className="border-l-4 border-blue-500 pl-4 py-2">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span className="bg-blue-900 text-blue-300 px-2 py-0.5 rounded text-xs">
-              THOUGHT
-            </span>
+        <EntryWrapper event={event}>
+          <div className="border-l-4 border-blue-500 pl-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span className="bg-blue-900 text-blue-300 px-2 py-0.5 rounded text-xs">
+                THOUGHT
+              </span>
+            </div>
+            <div className="mt-1 text-blue-300 whitespace-pre-wrap">
+              {payload.text_content}
+            </div>
           </div>
-          <div className="mt-1 text-blue-300 whitespace-pre-wrap">
-            {payload.text_content}
-          </div>
-        </div>
+        </EntryWrapper>
       );
     }
 
@@ -174,35 +215,39 @@ function TimelineEntry({ event }: { event: JournalEvent }) {
         call_id: string;
       };
       return (
-        <div className="border-l-4 border-yellow-500 pl-4 py-2">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span className="bg-yellow-900 text-yellow-300 px-2 py-0.5 rounded text-xs">
-              TOOL PROPOSED
-            </span>
+        <EntryWrapper event={event}>
+          <div className="border-l-4 border-yellow-500 pl-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span className="bg-yellow-900 text-yellow-300 px-2 py-0.5 rounded text-xs">
+                TOOL PROPOSED
+              </span>
+            </div>
+            <div className="mt-2 bg-yellow-900/20 rounded p-4 border border-yellow-800">
+              <div className="font-semibold text-yellow-300">{payload.tool_name}</div>
+              <pre className="mt-2 text-sm text-gray-400 overflow-x-auto">
+                {JSON.stringify(payload.args, null, 2)}
+              </pre>
+            </div>
           </div>
-          <div className="mt-2 bg-yellow-900/20 rounded p-4 border border-yellow-800">
-            <div className="font-semibold text-yellow-300">{payload.tool_name}</div>
-            <pre className="mt-2 text-sm text-gray-400 overflow-x-auto">
-              {JSON.stringify(payload.args, null, 2)}
-            </pre>
-          </div>
-        </div>
+        </EntryWrapper>
       );
     }
 
     case 'RUN_SUSPENDED': {
       const payload = event.payload as { reason: string };
       return (
-        <div className="border-l-4 border-orange-500 pl-4 py-2">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span className="bg-orange-900 text-orange-300 px-2 py-0.5 rounded text-xs">
-              SUSPENDED
-            </span>
+        <EntryWrapper event={event}>
+          <div className="border-l-4 border-orange-500 pl-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span className="bg-orange-900 text-orange-300 px-2 py-0.5 rounded text-xs">
+                SUSPENDED
+              </span>
+            </div>
+            <div className="mt-1 text-orange-300">{payload.reason}</div>
           </div>
-          <div className="mt-1 text-orange-300">{payload.reason}</div>
-        </div>
+        </EntryWrapper>
       );
     }
 
@@ -210,25 +255,27 @@ function TimelineEntry({ event }: { event: JournalEvent }) {
       const payload = event.payload as { decision: string; feedback?: string };
       const isApproved = payload.decision === 'approved';
       return (
-        <div
-          className={`border-l-4 ${isApproved ? 'border-green-500' : 'border-red-500'} pl-4 py-2`}
-        >
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span
-              className={`px-2 py-0.5 rounded text-xs ${
-                isApproved
-                  ? 'bg-green-900 text-green-300'
-                  : 'bg-red-900 text-red-300'
-              }`}
-            >
-              {isApproved ? 'APPROVED' : 'REJECTED'}
-            </span>
+        <EntryWrapper event={event}>
+          <div
+            className={`border-l-4 ${isApproved ? 'border-green-500' : 'border-red-500'} pl-4 py-2`}
+          >
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span
+                className={`px-2 py-0.5 rounded text-xs ${
+                  isApproved
+                    ? 'bg-green-900 text-green-300'
+                    : 'bg-red-900 text-red-300'
+                }`}
+              >
+                {isApproved ? 'APPROVED' : 'REJECTED'}
+              </span>
+            </div>
+            {payload.feedback && (
+              <div className="mt-1 text-gray-400 italic">{payload.feedback}</div>
+            )}
           </div>
-          {payload.feedback && (
-            <div className="mt-1 text-gray-400 italic">{payload.feedback}</div>
-          )}
-        </div>
+        </EntryWrapper>
       );
     }
 
@@ -240,75 +287,83 @@ function TimelineEntry({ event }: { event: JournalEvent }) {
       };
       const isSuccess = payload.status === 'success';
       return (
-        <div
-          className={`border-l-4 ${isSuccess ? 'border-green-500' : 'border-red-500'} pl-4 py-2`}
-        >
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span
-              className={`px-2 py-0.5 rounded text-xs ${
-                isSuccess
-                  ? 'bg-green-900 text-green-300'
-                  : 'bg-red-900 text-red-300'
-              }`}
-            >
-              {isSuccess ? 'SUCCESS' : 'ERROR'}
-            </span>
+        <EntryWrapper event={event}>
+          <div
+            className={`border-l-4 ${isSuccess ? 'border-green-500' : 'border-red-500'} pl-4 py-2`}
+          >
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span
+                className={`px-2 py-0.5 rounded text-xs ${
+                  isSuccess
+                    ? 'bg-green-900 text-green-300'
+                    : 'bg-red-900 text-red-300'
+                }`}
+              >
+                {isSuccess ? 'SUCCESS' : 'ERROR'}
+              </span>
+            </div>
+            <div className="mt-2 bg-gray-900/50 rounded p-2 border border-gray-700">
+              <pre className="text-sm text-gray-400 overflow-x-auto max-h-48">
+                {typeof payload.output_data === 'string'
+                  ? payload.output_data.slice(0, 500)
+                  : JSON.stringify(payload.output_data, null, 2).slice(0, 500)}
+              </pre>
+            </div>
           </div>
-          <div className="mt-2 bg-gray-900/50 rounded p-2 border border-gray-700">
-            <pre className="text-sm text-gray-400 overflow-x-auto max-h-48">
-              {typeof payload.output_data === 'string'
-                ? payload.output_data.slice(0, 500)
-                : JSON.stringify(payload.output_data, null, 2).slice(0, 500)}
-            </pre>
-          </div>
-        </div>
+        </EntryWrapper>
       );
     }
 
     case 'RUN_COMPLETED': {
       const payload = event.payload as { summary: string };
       return (
-        <div className="border-l-4 border-green-600 pl-4 py-2">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span className="bg-green-600 text-white px-2 py-0.5 rounded text-xs">
-              COMPLETED
-            </span>
+        <EntryWrapper event={event}>
+          <div className="border-l-4 border-green-600 pl-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span className="bg-green-600 text-white px-2 py-0.5 rounded text-xs">
+                COMPLETED
+              </span>
+            </div>
+            <div className="mt-1 text-green-300">{payload.summary}</div>
           </div>
-          <div className="mt-1 text-green-300">{payload.summary}</div>
-        </div>
+        </EntryWrapper>
       );
     }
 
     case 'SYSTEM_ERROR': {
       const payload = event.payload as { error_details: string };
       return (
-        <div className="border-l-4 border-red-600 pl-4 py-2">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span className="bg-red-600 text-white px-2 py-0.5 rounded text-xs">
-              ERROR
-            </span>
+        <EntryWrapper event={event}>
+          <div className="border-l-4 border-red-600 pl-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span className="bg-red-600 text-white px-2 py-0.5 rounded text-xs">
+                ERROR
+              </span>
+            </div>
+            <div className="mt-1 text-red-400">{payload.error_details}</div>
           </div>
-          <div className="mt-1 text-red-400">{payload.error_details}</div>
-        </div>
+        </EntryWrapper>
       );
     }
 
     default:
       return (
-        <div className="border-l-4 border-gray-600 pl-4 py-2">
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <span className="font-mono">{timestamp}</span>
-            <span className="bg-gray-700 text-gray-300 px-2 py-0.5 rounded text-xs">
-              {event.type}
-            </span>
+        <EntryWrapper event={event}>
+          <div className="border-l-4 border-gray-600 pl-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span className="bg-gray-700 text-gray-300 px-2 py-0.5 rounded text-xs">
+                {event.type}
+              </span>
+            </div>
+            <pre className="mt-1 text-sm text-gray-400">
+              {JSON.stringify(event.payload, null, 2)}
+            </pre>
           </div>
-          <pre className="mt-1 text-sm text-gray-400">
-            {JSON.stringify(event.payload, null, 2)}
-          </pre>
-        </div>
+        </EntryWrapper>
       );
   }
 }
