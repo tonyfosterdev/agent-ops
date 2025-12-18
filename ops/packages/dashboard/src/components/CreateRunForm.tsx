@@ -38,7 +38,7 @@ export function CreateRunForm({ onCreated, onCreate }: CreateRunFormProps) {
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <label htmlFor="prompt" className="block text-sm font-medium text-gray-700 mb-1">
+        <label htmlFor="prompt" className="block text-sm font-medium text-gray-300 mb-1">
           Task Prompt
         </label>
         <textarea
@@ -46,14 +46,14 @@ export function CreateRunForm({ onCreated, onCreate }: CreateRunFormProps) {
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={handleKeyDown}
-          className="w-full border rounded-lg px-4 py-3 text-gray-700 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
           rows={3}
           placeholder="Describe the task for the agent... (Press Enter to run, Shift+Enter for new line)"
         />
       </div>
 
       {error && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded text-sm">
+        <div className="bg-red-900/50 border border-red-700 text-red-300 px-4 py-2 rounded text-sm">
           {error}
         </div>
       )}
@@ -61,7 +61,7 @@ export function CreateRunForm({ onCreated, onCreate }: CreateRunFormProps) {
       <button
         type="submit"
         disabled={isLoading || !prompt.trim()}
-        className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        className="w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 px-6 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
         {isLoading ? 'Starting...' : 'Start Run'}
       </button>

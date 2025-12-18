@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import type { JournalEvent, Run, RunStatus, PendingTool } from '../types/journal';
+import { useState, useEffect } from 'react';
+import type { JournalEvent, RunStatus, PendingTool } from '../types/journal';
 
 interface UseRunResult {
   events: JournalEvent[];
@@ -60,7 +60,7 @@ export function useRun(runId: string | null): UseRunResult {
 
         // Track pending tool
         if (event.type === 'TOOL_PROPOSED') {
-          const payload = event.payload as PendingTool;
+          const payload = event.payload as unknown as PendingTool;
           setPendingTool(payload);
         } else if (event.type === 'TOOL_RESULT' || event.type === 'RUN_RESUMED') {
           setPendingTool(null);
