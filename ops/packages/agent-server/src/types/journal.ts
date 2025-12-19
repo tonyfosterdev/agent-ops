@@ -89,6 +89,8 @@ export interface AgentFinding {
 export const DANGEROUS_TOOLS = new Set([
   'shell_command_execute',
   'write_file',
+  // Docker operations require approval
+  'restart_service',
 ]);
 
 export const SAFE_TOOLS = new Set([

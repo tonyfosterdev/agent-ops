@@ -23,6 +23,7 @@ import {
   createLokiQueryTool,
   createLokiLabelsTool,
   createLokiServiceErrorsTool,
+  createRestartServiceTool,
 } from '../agents/coding/tools';
 import { getSystemPrompt as getCodingSystemPrompt } from '../agents/coding/prompts';
 
@@ -163,6 +164,8 @@ function getToolsForAgent(workDir: string) {
     loki_query: createLokiQueryTool(lokiUrl),
     loki_labels: createLokiLabelsTool(lokiUrl),
     loki_service_errors: createLokiServiceErrorsTool(lokiUrl),
+    // Docker service management (DANGEROUS)
+    restart_service: createRestartServiceTool(workDir),
   };
 
   // For dangerous tools, strip the execute function

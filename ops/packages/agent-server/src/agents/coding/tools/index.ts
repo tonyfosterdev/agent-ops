@@ -9,3 +9,4 @@ export {
   lokiLabelsSchema,
   lokiServiceErrorsSchema,
 } from './loki';
+export { createRestartServiceTool, restartServiceSchema } from './docker';
