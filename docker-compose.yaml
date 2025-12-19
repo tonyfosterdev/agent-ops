@@ -114,7 +114,7 @@ services:
     container_name: store-api
     environment:
       PORT: 3000
-      NODE_ENV: production
+      NODE_ENV: development
       DB_HOST: store-db
       DB_PORT: 5432
       DB_USERNAME: ${STORE_DB_USERNAME:-storeuser}
@@ -159,7 +159,7 @@ services:
     container_name: warehouse-alpha
     environment:
       PORT: 3000
-      NODE_ENV: production
+      NODE_ENV: development
       WAREHOUSE_NAME: warehouse-alpha
       WAREHOUSE_URL: http://api.localhost/warehouses/alpha
       WAREHOUSE_INTERNAL_URL: http://warehouse-alpha:3000
@@ -210,7 +210,7 @@ services:
     container_name: warehouse-beta
     environment:
       PORT: 3000
-      NODE_ENV: production
+      NODE_ENV: development
       WAREHOUSE_NAME: warehouse-beta
       WAREHOUSE_URL: http://api.localhost/warehouses/beta
       WAREHOUSE_INTERNAL_URL: http://warehouse-beta:3000
