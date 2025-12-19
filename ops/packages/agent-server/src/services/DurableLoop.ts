@@ -14,7 +14,16 @@ import { isDangerousTool, type JournalEvent, type ToolProposedPayload } from '..
 import { logger, config } from '../config';
 
 // Import tools from agents
-import { createShellTool, createReadFileTool, createWriteFileTool, createFindFilesTool, createSearchCodeTool } from '../agents/coding/tools';
+import {
+  createShellTool,
+  createReadFileTool,
+  createWriteFileTool,
+  createFindFilesTool,
+  createSearchCodeTool,
+  createLokiQueryTool,
+  createLokiLabelsTool,
+  createLokiServiceErrorsTool,
+} from '../agents/coding/tools';
 import { getSystemPrompt as getCodingSystemPrompt } from '../agents/coding/prompts';
 
 /**
@@ -141,12 +150,19 @@ function flushAssistantMessage(
  * Get tools for the agent, with dangerous tools having their execute function stripped
  */
 function getToolsForAgent(workDir: string) {
+  const lokiUrl = config.lokiUrl;
+
   const allTools = {
+    // File and code tools
     shell_command_execute: createShellTool(workDir),
     read_file: createReadFileTool(workDir),
     write_file: createWriteFileTool(workDir),
     find_files: createFindFilesTool(workDir),
     search_code: createSearchCodeTool(workDir),
+    // Loki log query tools (all SAFE)
+    loki_query: createLokiQueryTool(lokiUrl),
+    loki_labels: createLokiLabelsTool(lokiUrl),
+    loki_service_errors: createLokiServiceErrorsTool(lokiUrl),
   };
 
   // For dangerous tools, strip the execute function

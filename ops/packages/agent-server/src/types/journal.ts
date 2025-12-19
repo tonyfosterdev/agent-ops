@@ -95,7 +95,11 @@ export const SAFE_TOOLS = new Set([
   'read_file',
   'find_files',
   'search_code',
+  // Loki log query tools (read-only)
   'loki_query',
+  'loki_labels',
+  'loki_service_errors',
+  // Log analyzer tools
   'analyze_logs',
   'generate_report',
 ]);
