@@ -3,7 +3,7 @@ import { streamSSE } from 'hono/streaming';
 import { journalService } from '../services/JournalService';
 import { startRun, resumeRun, runAgentStep } from '../services/DurableLoop';
 import { logger } from '../config';
-import type { RunStatus } from '../types/journal';
+import type { RunStatus, AgentType } from '../types/journal';
 
 const runsRouter = new Hono();
 
@@ -12,14 +12,20 @@ const runsRouter = new Hono();
  */
 runsRouter.post('/', async (c) => {
   const body = await c.req.json();
-  const { prompt, user_id } = body;
+  const { prompt, user_id, agent_type = 'orchestrator' } = body;
 
   if (!prompt || !user_id) {
     return c.json({ error: 'prompt and user_id are required' }, 400);
   }
 
+  // Validate agent type
+  const validAgentTypes: AgentType[] = ['orchestrator', 'coding', 'log-analyzer'];
+  if (!validAgentTypes.includes(agent_type as AgentType)) {
+    return c.json({ error: `Invalid agent_type. Must be one of: ${validAgentTypes.join(', ')}` }, 400);
+  }
+
   try {
-    const runId = await startRun(prompt, user_id);
+    const runId = await startRun(prompt, user_id, agent_type as AgentType);
     return c.json({ id: runId, status: 'pending' }, 201);
   } catch (error: any) {
     logger.error({ error: error.message }, 'Failed to create run');
@@ -51,6 +57,8 @@ runsRouter.get('/', async (c) => {
         prompt: run.prompt,
         status: run.status,
         current_step: run.current_step,
+        agent_type: run.agent_type,
+        parent_run_id: run.parent_run_id,
         created_at: run.created_at,
         updated_at: run.updated_at,
         completed_at: run.completed_at,
@@ -89,6 +97,8 @@ runsRouter.get('/:id', async (c) => {
       prompt: run.prompt,
       status: run.status,
       current_step: run.current_step,
+      agent_type: run.agent_type,
+      parent_run_id: run.parent_run_id,
       created_at: run.created_at,
       updated_at: run.updated_at,
       completed_at: run.completed_at,

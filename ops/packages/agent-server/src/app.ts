@@ -3,7 +3,6 @@ import { cors } from 'hono/cors';
 import { logger as honoLogger } from 'hono/logger';
 import { basicAuth } from './middleware/auth';
 import { errorHandler } from './middleware/errorHandler';
-import agentRoutes from './routes/agents';
 import healthRoutes from './routes/health';
 import runsRoutes from './routes/runs';
 
@@ -23,10 +22,6 @@ export function createApp() {
 
   // Public routes (no auth)
   app.route('/health', healthRoutes);
-
-  // Protected routes (basic auth required)
-  app.use('/agents/*', basicAuth);
-  app.route('/agents', agentRoutes);
 
   // Durable Runs routes (public - no auth for dashboard ease of use)
   app.route('/runs', runsRoutes);

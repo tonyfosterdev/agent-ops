@@ -10,22 +10,14 @@
 import { generateText, type CoreMessage } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { journalService } from './JournalService';
-import { isDangerousTool, type JournalEvent, type ToolProposedPayload } from '../types/journal';
+import { isDangerousTool, type JournalEvent, type ToolProposedPayload, type AgentType } from '../types/journal';
 import { logger, config } from '../config';
+import { loadAgentDefinition } from '../agents/definitions';
+import type { Run } from '../entities/Run';
+import type { ToolContext } from '../agents/types';
 
-// Import tools from agents
-import {
-  createShellTool,
-  createReadFileTool,
-  createWriteFileTool,
-  createFindFilesTool,
-  createSearchCodeTool,
-  createLokiQueryTool,
-  createLokiLabelsTool,
-  createLokiServiceErrorsTool,
-  createRestartServiceTool,
-} from '../agents/coding/tools';
-import { getSystemPrompt as getCodingSystemPrompt } from '../agents/coding/prompts';
+// Constants for run limits
+const MAX_STEPS = 50;
 
 /**
  * Project journal events into LLM messages
@@ -39,6 +31,9 @@ function projectToPrompt(events: Array<{ event_type: string; payload: Record<str
 
   // Track tool proposals to pair with results
   const toolProposals = new Map<string, { tool_name: string; args: Record<string, unknown> }>();
+
+  // Track child runs to their tool call IDs for proper tool result mapping
+  const childRunToToolCall = new Map<string, string>();
 
   // Buffer for combining assistant thought + tool calls into single message
   let pendingThought: string | null = null;
@@ -106,6 +101,54 @@ function projectToPrompt(events: Array<{ event_type: string; payload: Record<str
         }
         break;
       }
+      case 'CHILD_RUN_STARTED': {
+        // Flush pending assistant message before child run starts
+        if (pendingThought || pendingToolCalls.length > 0) {
+          flushAssistantMessage(messages, pendingThought, pendingToolCalls);
+          pendingThought = null;
+          pendingToolCalls = [];
+        }
+        // Track the child run to match with CHILD_RUN_COMPLETED
+        // The tool call ID is captured from the most recent pending tool call
+        const payload = event.payload as { child_run_id: string; agent_type: string; task: string };
+        // Find the tool call that triggered this child run
+        // It should be the most recent delegation tool call
+        const lastDelegationTool = Array.from(toolProposals.entries())
+          .filter(([_, t]) => t.tool_name === 'run_coding_agent' || t.tool_name === 'run_log_analyzer_agent')
+          .pop();
+        if (lastDelegationTool) {
+          childRunToToolCall.set(payload.child_run_id, lastDelegationTool[0]);
+        }
+        break;
+      }
+      case 'CHILD_RUN_COMPLETED': {
+        // Flush pending assistant message before adding tool result
+        if (pendingThought || pendingToolCalls.length > 0) {
+          flushAssistantMessage(messages, pendingThought, pendingToolCalls);
+          pendingThought = null;
+          pendingToolCalls = [];
+        }
+        // Create a proper tool result for the delegation tool
+        const payload = event.payload as { child_run_id: string; success: boolean; summary: string };
+        const toolCallId = childRunToToolCall.get(payload.child_run_id);
+        if (toolCallId) {
+          const proposal = toolProposals.get(toolCallId);
+          messages.push({
+            role: 'tool',
+            content: [{
+              type: 'tool-result',
+              toolCallId,
+              toolName: proposal?.tool_name || 'unknown',
+              result: {
+                success: payload.success,
+                child_run_id: payload.child_run_id,
+                summary: payload.summary,
+              },
+            }] as any,
+          });
+        }
+        break;
+      }
       // Skip RUN_STARTED, RUN_SUSPENDED, RUN_COMPLETED, SYSTEM_ERROR
       // These are metadata events, not conversation content
     }
@@ -148,25 +191,19 @@ function flushAssistantMessage(
 }
 
 /**
- * Get tools for the agent, with dangerous tools having their execute function stripped
+ * Get tools for a run using agent definition, with dangerous tools having their execute function stripped
  */
-function getToolsForAgent(workDir: string) {
-  const lokiUrl = config.lokiUrl;
+function getToolsForRun(run: Run) {
+  const definition = loadAgentDefinition(run.agent_type);
 
-  const allTools = {
-    // File and code tools
-    shell_command_execute: createShellTool(workDir),
-    read_file: createReadFileTool(workDir),
-    write_file: createWriteFileTool(workDir),
-    find_files: createFindFilesTool(workDir),
-    search_code: createSearchCodeTool(workDir),
-    // Loki log query tools (all SAFE)
-    loki_query: createLokiQueryTool(lokiUrl),
-    loki_labels: createLokiLabelsTool(lokiUrl),
-    loki_service_errors: createLokiServiceErrorsTool(lokiUrl),
-    // Docker service management (DANGEROUS)
-    restart_service: createRestartServiceTool(workDir),
+  const context: ToolContext = {
+    workDir: config.workDir,
+    lokiUrl: config.lokiUrl,
+    runId: run.id,
+    parentRunId: run.parent_run_id,
   };
+
+  const allTools = definition.getTools(context);
 
   // For dangerous tools, strip the execute function
   // This allows the AI to propose the tool call, but prevents auto-execution
@@ -175,7 +212,7 @@ function getToolsForAgent(workDir: string) {
   for (const [name, tool] of Object.entries(allTools)) {
     if (isDangerousTool(name)) {
       // Strip execute to prevent auto-execution
-      const { execute, ...rest } = tool;
+      const { execute, ...rest } = tool as any;
       preparedTools[name] = rest;
     } else {
       // Safe tools keep execute for auto-execution
@@ -184,6 +221,14 @@ function getToolsForAgent(workDir: string) {
   }
 
   return { allTools, preparedTools };
+}
+
+/**
+ * Get system prompt for a run using agent definition
+ */
+function getSystemPromptForRun(run: Run): string {
+  const definition = loadAgentDefinition(run.agent_type);
+  return definition.getSystemPrompt();
 }
 
 /**
@@ -203,14 +248,14 @@ async function executeSingleStep(runId: string): Promise<{
   const events = await journalService.getEvents(runId);
   const messages = projectToPrompt(events, run.prompt);
 
-  const workDir = config.workDir;
-  const { allTools, preparedTools } = getToolsForAgent(workDir);
+  const { allTools, preparedTools } = getToolsForRun(run);
+  const systemPrompt = getSystemPromptForRun(run);
 
   try {
     const result = await generateText({
       model: anthropic('claude-sonnet-4-20250514'),
       maxSteps: 1, // KEY: Single step only for durability
-      system: getCodingSystemPrompt(),
+      system: systemPrompt,
       messages,
       tools: preparedTools,
     });
@@ -318,6 +363,17 @@ export async function runAgentStep(runId: string): Promise<void> {
     return;
   }
 
+  // Check step limit to prevent runaway loops
+  if (run.current_step >= MAX_STEPS) {
+    logger.error({ runId, currentStep: run.current_step, maxSteps: MAX_STEPS }, 'Run exceeded maximum step limit');
+    await journalService.appendEvent(runId, {
+      type: 'SYSTEM_ERROR',
+      payload: { error_details: `Run exceeded maximum step limit (${MAX_STEPS})` },
+    });
+    await journalService.updateStatus(runId, 'failed');
+    return;
+  }
+
   // Transition to running if pending
   if (run.status === 'pending') {
     await journalService.appendEvent(runId, {
@@ -391,7 +447,7 @@ export async function resumeRun(
     const pendingTool = journalService.findPendingTool(events);
 
     if (pendingTool) {
-      const { allTools } = getToolsForAgent(config.workDir);
+      const { allTools } = getToolsForRun(run);
       const tool = allTools[pendingTool.tool_name as keyof typeof allTools];
 
       if (tool && 'execute' in tool) {
@@ -428,8 +484,8 @@ export async function resumeRun(
 /**
  * Start a new run
  */
-export async function startRun(prompt: string, userId: string): Promise<string> {
-  const runId = await journalService.createRun(prompt, userId);
+export async function startRun(prompt: string, userId: string, agentType: AgentType = 'orchestrator'): Promise<string> {
+  const runId = await journalService.createRun(prompt, userId, agentType);
 
   // Start execution in background (non-blocking)
   runAgentStep(runId).catch((error) => {

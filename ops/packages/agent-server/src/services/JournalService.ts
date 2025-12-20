@@ -1,7 +1,7 @@
 import { AppDataSource } from '../database';
 import { Run } from '../entities/Run';
 import { JournalEntry } from '../entities/JournalEntry';
-import type { JournalEvent, RunStatus } from '../types/journal';
+import type { JournalEvent, RunStatus, AgentType } from '../types/journal';
 import { logger } from '../config';
 
 export class JournalService {
@@ -11,16 +11,40 @@ export class JournalService {
   /**
    * Create a new run
    */
-  async createRun(prompt: string, userId: string): Promise<string> {
+  async createRun(prompt: string, userId: string, agentType: AgentType = 'orchestrator'): Promise<string> {
     const run = this.runRepository.create({
       prompt,
       user_id: userId,
+      agent_type: agentType,
       status: 'pending',
       current_step: 0,
     });
 
     const saved = await this.runRepository.save(run);
-    logger.info({ runId: saved.id, userId }, 'Created new run');
+    logger.info({ runId: saved.id, userId, agentType }, 'Created new run');
+    return saved.id;
+  }
+
+  /**
+   * Create a child run (for delegation)
+   */
+  async createChildRun(
+    prompt: string,
+    userId: string,
+    parentRunId: string,
+    agentType: AgentType
+  ): Promise<string> {
+    const run = this.runRepository.create({
+      prompt,
+      user_id: userId,
+      parent_run_id: parentRunId,
+      agent_type: agentType,
+      status: 'pending',
+      current_step: 0,
+    });
+
+    const saved = await this.runRepository.save(run);
+    logger.info({ runId: saved.id, parentRunId, agentType }, 'Created child run');
     return saved.id;
   }
 

@@ -1,6 +1,10 @@
 import pino from 'pino';
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
+const disablePrettyPrint = process.env.DISABLE_PRETTY_PRINT_LOGGING === 'true';
+
+// Only use pino-pretty in development AND when not explicitly disabled (e.g., in Docker for Loki)
+const usePrettyPrint = isDevelopment && !disablePrettyPrint;
 
 export const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -14,7 +18,7 @@ export const logger = pino({
     service: 'warehouse-api',
     environment: process.env.NODE_ENV || 'development',
   },
-  ...(isDevelopment && {
+  ...(usePrettyPrint && {
     transport: {
       target: 'pino-pretty',
       options: {

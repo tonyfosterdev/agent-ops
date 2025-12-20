@@ -6,9 +6,11 @@ interface TimelineProps {
   pendingTool: PendingTool | null;
   onApprove: () => Promise<void>;
   onReject: (feedback: string) => Promise<void>;
+  parentRunId?: string | null;
+  onNavigateToParent?: () => void;
 }
 
-export function Timeline({ events, pendingTool, onApprove, onReject }: TimelineProps) {
+export function Timeline({ events, pendingTool, onApprove, onReject, parentRunId, onNavigateToParent }: TimelineProps) {
   if (events.length === 0) {
     return (
       <div className="text-gray-400 text-center py-8">
@@ -19,6 +21,22 @@ export function Timeline({ events, pendingTool, onApprove, onReject }: TimelineP
 
   return (
     <div className="space-y-4">
+      {parentRunId && onNavigateToParent && (
+        <button
+          onClick={onNavigateToParent}
+          className="flex items-center gap-2 text-purple-400 hover:text-purple-300 transition-colors text-sm mb-4"
+        >
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          </svg>
+          <span>Back to parent run</span>
+        </button>
+      )}
       {events.map((event) => (
         <TimelineEntry key={event.id} event={event} />
       ))}
@@ -235,7 +253,7 @@ function TimelineEntry({ event }: { event: JournalEvent }) {
     }
 
     case 'RUN_SUSPENDED': {
-      const payload = event.payload as { reason: string };
+      const payload = event.payload as { reason: string; blocked_by_child_run_id?: string };
       return (
         <EntryWrapper event={event}>
           <div className="border-l-4 border-orange-500 pl-4 py-2">
@@ -246,6 +264,14 @@ function TimelineEntry({ event }: { event: JournalEvent }) {
               </span>
             </div>
             <div className="mt-1 text-orange-300">{payload.reason}</div>
+            {payload.blocked_by_child_run_id && (
+              <a
+                href={`?runId=${payload.blocked_by_child_run_id}`}
+                className="text-purple-400 hover:text-purple-300 text-sm mt-2 inline-block transition-colors"
+              >
+                View blocking child run →
+              </a>
+            )}
           </div>
         </EntryWrapper>
       );
@@ -344,6 +370,68 @@ function TimelineEntry({ event }: { event: JournalEvent }) {
               </span>
             </div>
             <div className="mt-1 text-red-400">{payload.error_details}</div>
+          </div>
+        </EntryWrapper>
+      );
+    }
+
+    case 'CHILD_RUN_STARTED': {
+      const payload = event.payload as { child_run_id: string; agent_type: string; task: string };
+      return (
+        <EntryWrapper event={event}>
+          <div className="border-l-4 border-purple-500 pl-4 py-2">
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span className="bg-purple-900 text-purple-300 px-2 py-0.5 rounded text-xs">
+                DELEGATING
+              </span>
+            </div>
+            <div className="mt-1">
+              <span className="text-gray-400">Agent: </span>
+              <span className="text-purple-300 font-medium">{payload.agent_type}</span>
+            </div>
+            <div className="mt-1 text-gray-400 text-sm">{payload.task}</div>
+            <a
+              href={`?runId=${payload.child_run_id}`}
+              className="inline-block mt-2 text-purple-400 hover:text-purple-300 text-sm underline transition-colors"
+            >
+              View child run →
+            </a>
+          </div>
+        </EntryWrapper>
+      );
+    }
+
+    case 'CHILD_RUN_COMPLETED': {
+      const payload = event.payload as { child_run_id: string; success: boolean; summary: string };
+      return (
+        <EntryWrapper event={event}>
+          <div
+            className={`border-l-4 ${payload.success ? 'border-green-500' : 'border-red-500'} pl-4 py-2`}
+          >
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <span className="font-mono">{timestamp}</span>
+              <span
+                className={`px-2 py-0.5 rounded text-xs ${
+                  payload.success
+                    ? 'bg-green-900 text-green-300'
+                    : 'bg-red-900 text-red-300'
+                }`}
+              >
+                DELEGATION {payload.success ? 'COMPLETE' : 'FAILED'}
+              </span>
+            </div>
+            <div className="mt-1 text-gray-300">{payload.summary}</div>
+            <a
+              href={`?runId=${payload.child_run_id}`}
+              className={`inline-block mt-2 text-sm underline transition-colors ${
+                payload.success
+                  ? 'text-green-400 hover:text-green-300'
+                  : 'text-red-400 hover:text-red-300'
+              }`}
+            >
+              View child run →
+            </a>
           </div>
         </EntryWrapper>
       );

@@ -115,6 +115,7 @@ services:
     environment:
       PORT: 3000
       NODE_ENV: development
+      DISABLE_PRETTY_PRINT_LOGGING: "true"
       DB_HOST: store-db
       DB_PORT: 5432
       DB_USERNAME: ${STORE_DB_USERNAME:-storeuser}
@@ -160,6 +161,7 @@ services:
     environment:
       PORT: 3000
       NODE_ENV: development
+      DISABLE_PRETTY_PRINT_LOGGING: "true"
       WAREHOUSE_NAME: warehouse-alpha
       WAREHOUSE_URL: http://api.localhost/warehouses/alpha
       WAREHOUSE_INTERNAL_URL: http://warehouse-alpha:3000
@@ -211,6 +213,7 @@ services:
     environment:
       PORT: 3000
       NODE_ENV: development
+      DISABLE_PRETTY_PRINT_LOGGING: "true"
       WAREHOUSE_NAME: warehouse-beta
       WAREHOUSE_URL: http://api.localhost/warehouses/beta
       WAREHOUSE_INTERNAL_URL: http://warehouse-beta:3000

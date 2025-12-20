@@ -4,8 +4,12 @@ import { Timeline } from './components/Timeline';
 import { CreateRunForm } from './components/CreateRunForm';
 
 function App() {
-  const [runId, setRunId] = useState<string | null>(null);
-  const { events, status, pendingTool, isLoading, error } = useRun(runId);
+  // Parse runId from URL on initial load
+  const [runId, setRunId] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('runId');
+  });
+  const { events, status, pendingTool, isLoading, error, parentRunId } = useRun(runId);
   const timelineEndRef = useRef<HTMLDivElement>(null);
 
   const handleApprove = async () => {
@@ -90,6 +94,13 @@ function App() {
                   pendingTool={status === 'suspended' ? pendingTool : null}
                   onApprove={handleApprove}
                   onReject={handleReject}
+                  parentRunId={parentRunId}
+                  onNavigateToParent={() => {
+                    if (parentRunId) {
+                      setRunId(parentRunId);
+                      window.history.pushState({}, '', `?runId=${parentRunId}`);
+                    }
+                  }}
                 />
               )}
               <div ref={timelineEndRef} />

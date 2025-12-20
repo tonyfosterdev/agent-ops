@@ -4,6 +4,9 @@
  * Event-sourced journal types for persistent agent runs with HITL support.
  */
 
+// Agent types
+export type AgentType = 'orchestrator' | 'coding' | 'log-analyzer';
+
 // Run status states
 export type RunStatus = 'pending' | 'running' | 'suspended' | 'completed' | 'failed';
 
@@ -16,7 +19,9 @@ export type JournalEventType =
   | 'RUN_RESUMED'
   | 'TOOL_RESULT'
   | 'RUN_COMPLETED'
-  | 'SYSTEM_ERROR';
+  | 'SYSTEM_ERROR'
+  | 'CHILD_RUN_STARTED'
+  | 'CHILD_RUN_COMPLETED';
 
 // Discriminated union for journal events
 export type JournalEvent =
@@ -27,7 +32,9 @@ export type JournalEvent =
   | { type: 'RUN_RESUMED'; payload: RunResumedPayload }
   | { type: 'TOOL_RESULT'; payload: ToolResultPayload }
   | { type: 'RUN_COMPLETED'; payload: RunCompletedPayload }
-  | { type: 'SYSTEM_ERROR'; payload: SystemErrorPayload };
+  | { type: 'SYSTEM_ERROR'; payload: SystemErrorPayload }
+  | { type: 'CHILD_RUN_STARTED'; payload: ChildRunStartedPayload }
+  | { type: 'CHILD_RUN_COMPLETED'; payload: ChildRunCompletedPayload };
 
 // Event payload types
 export interface RunStartedPayload {
@@ -47,6 +54,8 @@ export interface ToolProposedPayload {
 
 export interface RunSuspendedPayload {
   reason: string;
+  blocked_by_child_run_id?: string;
+  child_agent_type?: AgentType;
 }
 
 export interface RunResumedPayload {
@@ -66,6 +75,18 @@ export interface RunCompletedPayload {
 
 export interface SystemErrorPayload {
   error_details: string;
+}
+
+export interface ChildRunStartedPayload {
+  child_run_id: string;
+  agent_type: AgentType;
+  task: string;
+}
+
+export interface ChildRunCompletedPayload {
+  child_run_id: string;
+  success: boolean;
+  summary: string;
 }
 
 // AgentReport interface for sub-agents (headless, JSON-only output)
@@ -104,6 +125,9 @@ export const SAFE_TOOLS = new Set([
   // Log analyzer tools
   'analyze_logs',
   'generate_report',
+  // Delegation tools (require HITL via child run suspension)
+  'run_coding_agent',
+  'run_log_analyzer_agent',
 ]);
 
 export function isDangerousTool(toolName: string): boolean {

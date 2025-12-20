@@ -7,6 +7,7 @@ interface UseRunResult {
   pendingTool: PendingTool | null;
   isLoading: boolean;
   error: string | null;
+  parentRunId: string | null;
 }
 
 const API_BASE = '';
@@ -17,18 +18,30 @@ export function useRun(runId: string | null): UseRunResult {
   const [pendingTool, setPendingTool] = useState<PendingTool | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [parentRunId, setParentRunId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!runId) {
       setEvents([]);
       setStatus('pending');
       setPendingTool(null);
+      setParentRunId(null);
       setIsLoading(false);
       return;
     }
 
     setIsLoading(true);
     setError(null);
+
+    // Fetch run metadata to get parent_run_id
+    fetch(`${API_BASE}/runs/${runId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        setParentRunId(data.parent_run_id || null);
+      })
+      .catch((err) => {
+        console.error('Failed to fetch run metadata:', err);
+      });
 
     // Create EventSource for SSE
     const eventSource = new EventSource(`${API_BASE}/runs/${runId}/events`);
@@ -94,7 +107,7 @@ export function useRun(runId: string | null): UseRunResult {
     };
   }, [runId]);
 
-  return { events, status, pendingTool, isLoading, error };
+  return { events, status, pendingTool, isLoading, error, parentRunId };
 }
 
 export async function createRun(prompt: string, userId: string): Promise<string> {

@@ -1,5 +1,7 @@
 // Shared types for the dashboard
 
+export type AgentType = 'orchestrator' | 'coding' | 'log-analyzer';
+
 export type RunStatus = 'pending' | 'running' | 'suspended' | 'completed' | 'failed';
 
 export type JournalEventType =
@@ -10,7 +12,9 @@ export type JournalEventType =
   | 'RUN_RESUMED'
   | 'TOOL_RESULT'
   | 'RUN_COMPLETED'
-  | 'SYSTEM_ERROR';
+  | 'SYSTEM_ERROR'
+  | 'CHILD_RUN_STARTED'
+  | 'CHILD_RUN_COMPLETED';
 
 export interface JournalEvent {
   id: string;
@@ -32,6 +36,8 @@ export interface Run {
   prompt: string;
   status: RunStatus;
   current_step: number;
+  agent_type: AgentType;
+  parent_run_id?: string;
   created_at: string;
   updated_at: string;
   completed_at?: string;
