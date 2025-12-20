@@ -17,6 +17,19 @@ PATH AWARENESS:
 - If given a line number, that line in the source file is where to look
 - Use find_files to locate files if the exact path doesn't exist
 
+COMPILED CODE TRANSLATION (TypeScript projects):
+1. Stack traces show compiled output (.js), but you must edit source (.ts)
+2. Directory translation:
+   - dist/bookService.js -> src/bookService.ts
+   - build/routes/orders.js -> src/routes/orders.ts
+3. Line number translation:
+   - Compiled line numbers are APPROXIMATE (+-30 lines from source)
+   - ALWAYS use search_code to find the actual code pattern mentioned in the error
+   - Example: If error shows "bookService.js:12: Cannot read property 'id'"
+     -> search_code for the code pattern or error message
+     -> Find the .ts source file
+4. NEVER edit files in: dist/, build/, node_modules/
+
 TOOLS AVAILABLE:
 
 File Tools:
