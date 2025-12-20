@@ -32,9 +32,6 @@ function projectToPrompt(events: Array<{ event_type: string; payload: Record<str
   // Track tool proposals to pair with results
   const toolProposals = new Map<string, { tool_name: string; args: Record<string, unknown> }>();
 
-  // Track child runs to their tool call IDs for proper tool result mapping
-  const childRunToToolCall = new Map<string, string>();
-
   // Buffer for combining assistant thought + tool calls into single message
   let pendingThought: string | null = null;
   let pendingToolCalls: Array<{ toolCallId: string; toolName: string; args: unknown }> = [];
@@ -101,56 +98,19 @@ function projectToPrompt(events: Array<{ event_type: string; payload: Record<str
         }
         break;
       }
-      case 'CHILD_RUN_STARTED': {
-        // Flush pending assistant message before child run starts
-        if (pendingThought || pendingToolCalls.length > 0) {
-          flushAssistantMessage(messages, pendingThought, pendingToolCalls);
-          pendingThought = null;
-          pendingToolCalls = [];
-        }
-        // Track the child run to match with CHILD_RUN_COMPLETED
-        // The tool call ID is captured from the most recent pending tool call
-        const payload = event.payload as { child_run_id: string; agent_type: string; task: string };
-        // Find the tool call that triggered this child run
-        // It should be the most recent delegation tool call
-        const lastDelegationTool = Array.from(toolProposals.entries())
-          .filter(([_, t]) => t.tool_name === 'run_coding_agent' || t.tool_name === 'run_log_analyzer_agent')
-          .pop();
-        if (lastDelegationTool) {
-          childRunToToolCall.set(payload.child_run_id, lastDelegationTool[0]);
-        }
-        break;
-      }
-      case 'CHILD_RUN_COMPLETED': {
-        // Flush pending assistant message before adding tool result
-        if (pendingThought || pendingToolCalls.length > 0) {
-          flushAssistantMessage(messages, pendingThought, pendingToolCalls);
-          pendingThought = null;
-          pendingToolCalls = [];
-        }
-        // Create a proper tool result for the delegation tool
-        const payload = event.payload as { child_run_id: string; success: boolean; summary: string };
-        const toolCallId = childRunToToolCall.get(payload.child_run_id);
-        if (toolCallId) {
-          const proposal = toolProposals.get(toolCallId);
-          messages.push({
-            role: 'tool',
-            content: [{
-              type: 'tool-result',
-              toolCallId,
-              toolName: proposal?.tool_name || 'unknown',
-              result: {
-                success: payload.success,
-                child_run_id: payload.child_run_id,
-                summary: payload.summary,
-              },
-            }] as any,
-          });
-        }
-        break;
-      }
-      // Skip RUN_STARTED, RUN_SUSPENDED, RUN_COMPLETED, SYSTEM_ERROR
-      // These are metadata events, not conversation content
+      // Skip CHILD_RUN_STARTED, CHILD_RUN_COMPLETED - these are metadata events for the dashboard.
+      // For delegation tools (run_coding_agent, run_log_analyzer_agent), the event sequence is:
+      //   1. TOOL_PROPOSED (tool name + args) - recorded by executeSingleStep
+      //   2. CHILD_RUN_STARTED - recorded by delegation tool's execute()
+      //   3. CHILD_RUN_COMPLETED - recorded by delegation tool's execute()
+      //   4. TOOL_RESULT (contains {success, child_run_id, summary}) - recorded by executeSingleStep
+      //
+      // The LLM conversation only needs TOOL_PROPOSED + TOOL_RESULT pairs.
+      // CHILD_RUN_STARTED/COMPLETED are redundant for prompt reconstruction since
+      // TOOL_RESULT already contains the delegation outcome from the tool's return value.
+      //
+      // Skip RUN_STARTED, RUN_SUSPENDED, RUN_COMPLETED, SYSTEM_ERROR - these are
+      // run lifecycle events, not conversation content
     }
   }
 

@@ -90,5 +90,17 @@ Example output format:
   1. BookService.listBooks (bookService.ts:12) <- Primary cause
   2. handler (bookRoutes.ts:13)
 
+CRITICAL OUTPUT CONSTRAINT:
+Your final response will be parsed programmatically by the orchestrator agent. You MUST:
+- Output plain text only
+- No markdown (no #, *, -, \`, etc.)
+- No emojis
+- Maximum 3 sentences
+- Format: "[Error type] in [location]. [Root cause]. [Recommendation]."
+
+Example (success): "TypeError in bookService.ts line 12 BookService.listBooks. Null reference on database query result. Check database connection or add null handling."
+
+Example (failure): "Could not identify error source in logs. No matching log entries found for timeframe. Verify service is logging correctly or expand search window."
+
 Remember: Your goal is to provide insights that help developers fix issues quickly.`;
 }
