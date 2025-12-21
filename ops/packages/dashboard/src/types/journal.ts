@@ -2,7 +2,7 @@
 
 export type AgentType = 'orchestrator' | 'coding' | 'log-analyzer';
 
-export type RunStatus = 'pending' | 'running' | 'suspended' | 'completed' | 'failed';
+export type RunStatus = 'pending' | 'running' | 'suspended' | 'completed' | 'failed' | 'cancelled';
 
 export type JournalEventType =
   | 'RUN_STARTED'
@@ -14,7 +14,8 @@ export type JournalEventType =
   | 'RUN_COMPLETED'
   | 'SYSTEM_ERROR'
   | 'CHILD_RUN_STARTED'
-  | 'CHILD_RUN_COMPLETED';
+  | 'CHILD_RUN_COMPLETED'
+  | 'RUN_CANCELLED';
 
 export interface JournalEvent {
   id: string;

@@ -312,7 +312,7 @@ export async function runAgentStep(runId: string): Promise<void> {
   }
 
   // Check terminal states
-  if (run.status === 'completed' || run.status === 'failed') {
+  if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
     logger.info({ runId, status: run.status }, 'Run already in terminal state');
     return;
   }

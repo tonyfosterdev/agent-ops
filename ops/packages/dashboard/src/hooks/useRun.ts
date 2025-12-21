@@ -64,6 +64,8 @@ export function useRun(runId: string | null): UseRunResult {
           setStatus('completed');
         } else if (event.type === 'SYSTEM_ERROR') {
           setStatus('failed');
+        } else if (event.type === 'RUN_CANCELLED') {
+          setStatus('cancelled');
         } else if (event.type === 'RUN_STARTED') {
           setStatus('running');
         } else if (event.type === 'RUN_RESUMED') {
@@ -144,5 +146,16 @@ export async function resumeRun(
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to resume run');
+  }
+}
+
+export async function cancelRun(runId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/runs/${runId}/cancel`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to cancel run');
   }
 }

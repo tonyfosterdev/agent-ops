@@ -1,5 +1,6 @@
-import { useState, useEffect, ReactNode } from 'react';
+import { useState, useEffect, useCallback, ReactNode } from 'react';
 import type { JournalEvent, PendingTool } from '../types/journal';
+import { resumeRun } from '../hooks/useRun';
 
 interface TimelineProps {
   events: JournalEvent[];
@@ -15,6 +16,13 @@ type ChildRunEventsCache = Map<string, { events: JournalEvent[]; totalEvents: nu
 
 // Timeout for fetching child run events (30 seconds)
 const CHILD_RUN_FETCH_TIMEOUT_MS = 30000;
+
+// Retry configuration for child run events fetch
+const MAX_CHILD_RUN_RETRIES = 5;
+const CHILD_RUN_RETRY_DELAY_MS = 500;
+
+// Max poll attempts for child approval (2 minutes at 2-second intervals)
+const MAX_APPROVAL_POLL_ATTEMPTS = 60;
 
 const API_BASE = '';
 const MAX_INLINE_EVENTS = 100;
@@ -35,14 +43,14 @@ export function Timeline({ events, pendingTool, onApprove, onReject, parentRunId
     });
   };
 
-  // Callback to cache fetched child run events
-  const onChildRunEventsFetched = (childRunId: string, fetchedEvents: JournalEvent[], totalEvents: number) => {
+  // Callback to cache fetched child run events - wrapped in useCallback to prevent unnecessary re-renders
+  const onChildRunEventsFetched = useCallback((childRunId: string, fetchedEvents: JournalEvent[], totalEvents: number) => {
     setChildRunEventsCache((prev) => {
       const next = new Map(prev);
       next.set(childRunId, { events: fetchedEvents, totalEvents });
       return next;
     });
-  };
+  }, []);
 
   if (events.length === 0) {
     return (
@@ -187,6 +195,211 @@ function InlineApproval({
   );
 }
 
+/**
+ * Component to display and handle child run approval inline in parent's timeline.
+ * Fetches child's pending tool and provides approve/reject buttons.
+ * Polls every 2 seconds while waiting for pending tool data.
+ * Uses AbortController with timeout and bounded polling to prevent infinite loops.
+ */
+function ChildApprovalInline({ childRunId }: { childRunId: string }) {
+  const [pendingTool, setPendingTool] = useState<PendingTool | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [feedback, setFeedback] = useState('');
+  const [childStatus, setChildStatus] = useState<string | null>(null);
+  const [isResolved, setIsResolved] = useState(false);
+  const [maxPollsReached, setMaxPollsReached] = useState(false);
+
+  useEffect(() => {
+    // Stop polling after user has submitted approval/rejection
+    if (isResolved) return;
+
+    let pollTimeoutId: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+    let pollCount = 0;
+
+    const fetchChildSnapshot = async () => {
+      // Check poll limit BEFORE making the fetch call
+      if (pollCount >= MAX_APPROVAL_POLL_ATTEMPTS) {
+        setMaxPollsReached(true);
+        setError('Timed out waiting for child approval data');
+        setIsLoading(false);
+        return;
+      }
+      pollCount++;
+
+      const controller = new AbortController();
+      const fetchTimeoutId = setTimeout(() => controller.abort(), CHILD_RUN_FETCH_TIMEOUT_MS);
+
+      try {
+        const res = await fetch(`${API_BASE}/runs/${childRunId}/events/snapshot?limit=1`, {
+          signal: controller.signal
+        });
+        clearTimeout(fetchTimeoutId);
+
+        if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
+        const data = await res.json();
+
+        if (cancelled) return;
+
+        setChildStatus(data.status);
+
+        if (data.pending_tool) {
+          setPendingTool(data.pending_tool);
+          setIsLoading(false);
+        } else if (data.status === 'suspended') {
+          // Suspended but no pending_tool yet - poll again
+          pollTimeoutId = setTimeout(fetchChildSnapshot, 2000);
+        } else {
+          // Child run completed/no longer suspended
+          setIsLoading(false);
+        }
+      } catch (err: any) {
+        clearTimeout(fetchTimeoutId);
+        if (cancelled) return;
+        if (err.name === 'AbortError') {
+          setError('Request timed out');
+        } else {
+          setError(err.message);
+        }
+        setIsLoading(false);
+      }
+    };
+
+    fetchChildSnapshot();
+
+    return () => {
+      cancelled = true;
+      if (pollTimeoutId) clearTimeout(pollTimeoutId);
+    };
+  }, [childRunId, isResolved]);
+
+  const handleApprove = async () => {
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      await resumeRun(childRunId, 'approved');
+      setIsResolved(true); // Stop polling after successful approval
+      setPendingTool(null); // Clear after successful approval
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleReject = async () => {
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      await resumeRun(childRunId, 'rejected', feedback || 'User rejected');
+      setIsResolved(true); // Stop polling after successful rejection
+      setPendingTool(null); // Clear after successful rejection
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="mt-3 bg-orange-900/20 rounded-lg border border-orange-700 p-4">
+        <div className="flex items-center gap-2 text-orange-400">
+          <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+          </svg>
+          <span className="text-sm">Loading child approval request...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !pendingTool) {
+    return (
+      <div className="mt-3 bg-red-900/30 rounded-lg border border-red-700 p-4">
+        <div className="text-red-400 text-sm">Failed to load child approval: {error}</div>
+        {maxPollsReached && (
+          <a
+            href={`?runId=${childRunId}`}
+            className="mt-2 inline-block text-purple-400 hover:text-purple-300 text-sm underline transition-colors"
+          >
+            View child run directly
+          </a>
+        )}
+      </div>
+    );
+  }
+
+  if (!pendingTool) {
+    return (
+      <div className="mt-3 bg-gray-800/50 rounded-lg border border-gray-700 p-4">
+        <div className="text-gray-400 text-sm">
+          Child run {childStatus === 'suspended' ? 'is suspended but has no pending tool.' : 'no longer requires approval.'}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 bg-orange-900/30 rounded-lg border border-orange-700 p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="bg-purple-600 text-white px-2 py-0.5 rounded text-xs font-medium">
+          CHILD APPROVAL
+        </span>
+        <span className="text-orange-300 text-sm">Child agent needs approval</span>
+      </div>
+
+      <div className="mb-3">
+        <span className="text-sm text-gray-400">Tool:</span>
+        <span className="ml-2 font-semibold text-orange-200">{pendingTool.tool_name}</span>
+      </div>
+
+      <div className="mb-3">
+        <span className="text-sm text-gray-400">Arguments:</span>
+        <pre className="mt-1 bg-gray-900/50 rounded p-3 text-sm text-gray-300 overflow-x-auto max-h-32 border border-gray-700">
+          {JSON.stringify(pendingTool.args, null, 2)}
+        </pre>
+      </div>
+
+      <div className="mb-3">
+        <input
+          type="text"
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          className="w-full bg-gray-900/50 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-500"
+          placeholder="Rejection reason (optional)"
+        />
+      </div>
+
+      {error && (
+        <div className="mb-3 bg-red-900/50 border border-red-700 text-red-300 px-3 py-2 rounded text-sm">
+          {error}
+        </div>
+      )}
+
+      <div className="flex gap-3">
+        <button
+          onClick={handleApprove}
+          disabled={isSubmitting}
+          className="flex-1 bg-green-600 hover:bg-green-500 text-white font-medium py-2 px-4 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {isSubmitting ? 'Processing...' : 'Approve'}
+        </button>
+        <button
+          onClick={handleReject}
+          disabled={isSubmitting}
+          className="flex-1 bg-red-600 hover:bg-red-500 text-white font-medium py-2 px-4 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {isSubmitting ? 'Processing...' : 'Reject'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function RawEventToggle({ event }: { event: JournalEvent }) {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -234,60 +447,90 @@ interface InlineChildRunEventsProps {
  * Inline child run events component
  * Fetches and displays child run events inline with indentation.
  * Uses cache to avoid refetching on expand/collapse toggle.
+ * Implements bounded retry for race condition when parent emits CHILD_RUN_STARTED
+ * before child's RUN_STARTED event exists.
  */
 function InlineChildRunEvents({ childRunId, cachedData, onEventsFetched }: InlineChildRunEventsProps) {
   const [events, setEvents] = useState<JournalEvent[]>(cachedData?.events || []);
   const [isLoading, setIsLoading] = useState(!cachedData);
   const [error, setError] = useState<string | null>(null);
   const [totalEvents, setTotalEvents] = useState(cachedData?.totalEvents || 0);
+  const [retryCount, setRetryCount] = useState(0);
+  const [maxRetriesReached, setMaxRetriesReached] = useState(false);
 
   useEffect(() => {
-    // Skip fetch if we have cached data
-    if (cachedData) {
+    // Skip fetch if we have cached data with events
+    if (cachedData && cachedData.events.length > 0) {
       setEvents(cachedData.events);
       setTotalEvents(cachedData.totalEvents);
       setIsLoading(false);
       return;
     }
 
-    setIsLoading(true);
-    setError(null);
+    let cancelled = false;
+    let currentRetry = 0;
 
-    // Create AbortController for timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), CHILD_RUN_FETCH_TIMEOUT_MS);
+    const fetchWithRetry = async () => {
+      setIsLoading(true);
+      setError(null);
 
-    fetch(`${API_BASE}/runs/${childRunId}`, { signal: controller.signal })
-      .then((res) => {
-        clearTimeout(timeoutId);
-        if (!res.ok) {
-          throw new Error(`Failed to fetch child run: ${res.status}`);
+      while (!cancelled && currentRetry <= MAX_CHILD_RUN_RETRIES) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), CHILD_RUN_FETCH_TIMEOUT_MS);
+
+          const res = await fetch(`${API_BASE}/runs/${childRunId}/events/snapshot?limit=${MAX_INLINE_EVENTS}`, {
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+
+          if (!res.ok) throw new Error(`Failed to fetch child run: ${res.status}`);
+          const data = await res.json();
+
+          if (cancelled) return;
+
+          const fetchedEvents = data.events || [];
+          const runStatus = data.status;
+
+          // If no events but run still starting, retry with bounded attempts
+          if (fetchedEvents.length === 0 &&
+              (runStatus === 'pending' || runStatus === 'running') &&
+              currentRetry < MAX_CHILD_RUN_RETRIES) {
+            currentRetry++;
+            setRetryCount(currentRetry);
+            await new Promise(resolve => setTimeout(resolve, CHILD_RUN_RETRY_DELAY_MS));
+            continue;
+          }
+
+          // Success or max retries reached
+          setTotalEvents(data.total_count || fetchedEvents.length);
+          setEvents(fetchedEvents);
+          setMaxRetriesReached(fetchedEvents.length === 0 && currentRetry >= MAX_CHILD_RUN_RETRIES);
+          setIsLoading(false);
+
+          // Only cache if we have events
+          if (fetchedEvents.length > 0) {
+            onEventsFetched(childRunId, fetchedEvents, data.total_count || fetchedEvents.length);
+          }
+          return;
+        } catch (err: any) {
+          if (cancelled) return;
+          console.error('Failed to fetch child run events:', err);
+          if (err.name === 'AbortError') {
+            setError('Request timed out after 30 seconds');
+          } else {
+            setError(err.message);
+          }
+          setIsLoading(false);
+          return;
         }
-        return res.json();
-      })
-      .then((data) => {
-        const allEvents = data.events || [];
-        const limitedEvents = allEvents.slice(0, MAX_INLINE_EVENTS);
-        setTotalEvents(allEvents.length);
-        setEvents(limitedEvents);
-        setIsLoading(false);
-        // Cache the fetched events
-        onEventsFetched(childRunId, limitedEvents, allEvents.length);
-      })
-      .catch((err) => {
-        clearTimeout(timeoutId);
-        console.error('Failed to fetch child run events:', err);
-        if (err.name === 'AbortError') {
-          setError('Request timed out after 30 seconds');
-        } else {
-          setError(err.message);
-        }
-        setIsLoading(false);
-      });
+      }
+    };
+
+    fetchWithRetry();
 
     return () => {
-      clearTimeout(timeoutId);
-      controller.abort();
+      cancelled = true;
     };
   }, [childRunId, cachedData, onEventsFetched]);
 
@@ -299,7 +542,11 @@ function InlineChildRunEvents({ childRunId, cachedData, onEventsFetched }: Inlin
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
           </svg>
-          <span className="text-sm">Loading child run events...</span>
+          <span className="text-sm">
+            {retryCount > 0
+              ? `Loading child run events (attempt ${retryCount + 1}/${MAX_CHILD_RUN_RETRIES + 1})...`
+              : 'Loading child run events...'}
+          </span>
         </div>
       </div>
     );
@@ -309,6 +556,23 @@ function InlineChildRunEvents({ childRunId, cachedData, onEventsFetched }: Inlin
     return (
       <div className="ml-8 mt-2 border-l-2 border-red-800 pl-4 py-2">
         <div className="text-red-400 text-sm">Failed to load child run: {error}</div>
+      </div>
+    );
+  }
+
+  // Show helpful message after max retries with no events
+  if (events.length === 0 && maxRetriesReached) {
+    return (
+      <div className="ml-8 mt-2 border-l-2 border-yellow-800 pl-4 py-2">
+        <div className="text-yellow-400 text-sm">
+          Child run has not produced events yet.
+          <a
+            href={`?runId=${childRunId}`}
+            className="ml-2 text-purple-400 hover:text-purple-300 underline transition-colors"
+          >
+            View child run directly
+          </a>
+        </div>
       </div>
     );
   }
@@ -563,12 +827,15 @@ function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEve
             </div>
             <div className="mt-1 text-orange-300">{payload.reason}</div>
             {payload.blocked_by_child_run_id && (
-              <a
-                href={`?runId=${payload.blocked_by_child_run_id}`}
-                className="text-purple-400 hover:text-purple-300 text-sm mt-2 inline-block transition-colors"
-              >
-                View blocking child run
-              </a>
+              <>
+                <ChildApprovalInline childRunId={payload.blocked_by_child_run_id} />
+                <a
+                  href={`?runId=${payload.blocked_by_child_run_id}`}
+                  className="text-purple-400 hover:text-purple-300 text-sm mt-3 inline-block transition-colors"
+                >
+                  View full child run
+                </a>
+              </>
             )}
           </div>
         </EntryWrapper>

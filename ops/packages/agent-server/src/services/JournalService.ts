@@ -93,6 +93,24 @@ export class JournalService {
   }
 
   /**
+   * Get limited events for a run (for snapshot endpoint)
+   */
+  async getEventsLimited(runId: string, limit: number): Promise<JournalEntry[]> {
+    return this.entryRepository.find({
+      where: { run_id: runId },
+      order: { sequence: 'ASC' },
+      take: limit,
+    });
+  }
+
+  /**
+   * Get total count of events for a run
+   */
+  async getEventCount(runId: string): Promise<number> {
+    return this.entryRepository.count({ where: { run_id: runId } });
+  }
+
+  /**
    * Get run by ID
    */
   async getRun(runId: string): Promise<Run | null> {
@@ -116,7 +134,7 @@ export class JournalService {
   async updateStatus(runId: string, status: RunStatus): Promise<void> {
     const updateData: Partial<Run> = { status };
 
-    if (status === 'completed' || status === 'failed') {
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
       updateData.completed_at = new Date();
     }
 
@@ -160,8 +178,16 @@ export class JournalService {
 
   /**
    * Find the pending tool from events (used for resume)
+   * Alias for findPendingToolFromEntries for backwards compatibility.
    */
   findPendingTool(entries: JournalEntry[]): { tool_name: string; args: Record<string, unknown>; call_id: string } | null {
+    return this.findPendingToolFromEntries(entries);
+  }
+
+  /**
+   * Find the pending tool from journal entries
+   */
+  findPendingToolFromEntries(entries: JournalEntry[]): { tool_name: string; args: Record<string, unknown>; call_id: string } | null {
     // Find the last TOOL_PROPOSED that doesn't have a corresponding TOOL_RESULT
     const proposedTools: Map<string, { tool_name: string; args: Record<string, unknown>; call_id: string }> = new Map();
     const completedTools: Set<string> = new Set();

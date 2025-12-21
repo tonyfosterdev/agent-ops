@@ -8,7 +8,7 @@
 export type AgentType = 'orchestrator' | 'coding' | 'log-analyzer';
 
 // Run status states
-export type RunStatus = 'pending' | 'running' | 'suspended' | 'completed' | 'failed';
+export type RunStatus = 'pending' | 'running' | 'suspended' | 'completed' | 'failed' | 'cancelled';
 
 // Journal event types (as specified in PLAN_PROMPT.md)
 export type JournalEventType =
@@ -21,7 +21,8 @@ export type JournalEventType =
   | 'RUN_COMPLETED'
   | 'SYSTEM_ERROR'
   | 'CHILD_RUN_STARTED'
-  | 'CHILD_RUN_COMPLETED';
+  | 'CHILD_RUN_COMPLETED'
+  | 'RUN_CANCELLED';
 
 // Discriminated union for journal events
 export type JournalEvent =
@@ -34,7 +35,8 @@ export type JournalEvent =
   | { type: 'RUN_COMPLETED'; payload: RunCompletedPayload }
   | { type: 'SYSTEM_ERROR'; payload: SystemErrorPayload }
   | { type: 'CHILD_RUN_STARTED'; payload: ChildRunStartedPayload }
-  | { type: 'CHILD_RUN_COMPLETED'; payload: ChildRunCompletedPayload };
+  | { type: 'CHILD_RUN_COMPLETED'; payload: ChildRunCompletedPayload }
+  | { type: 'RUN_CANCELLED'; payload: RunCancelledPayload };
 
 // Event payload types
 export interface RunStartedPayload {
@@ -87,6 +89,11 @@ export interface ChildRunCompletedPayload {
   child_run_id: string;
   success: boolean;
   summary: string;
+}
+
+export interface RunCancelledPayload {
+  reason: string;
+  cancelled_by: string;
 }
 
 // AgentReport interface for sub-agents (headless, JSON-only output)
