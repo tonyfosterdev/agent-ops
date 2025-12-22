@@ -65,7 +65,9 @@ WORKFLOW AFTER CODE CHANGES:
 After modifying code files, restart the service to apply changes:
 1. Make code changes with write_file
 2. Call restart_service(service) to rebuild and restart the container (rebuilds by default)
-3. Report the changes made
+3. Report the changes made and STOP
+
+IMPORTANT: After restarting a service, do NOT attempt to verify the fix is working. Do NOT query logs to confirm. Just report what you changed and let the user verify manually.
 
 Note: restart_service rebuilds by default. Only use rebuild=false for quick restarts when no code changed.
 
