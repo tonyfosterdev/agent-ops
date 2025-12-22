@@ -336,6 +336,7 @@ services:
       AUTH_USERNAME: ${AGENT_SERVER_USERNAME:-admin}
       AUTH_PASSWORD: ${AGENT_SERVER_PASSWORD}
       WORK_DIR: /workspace
+      COMPOSE_PROJECT_NAME: agentops
       LOG_LEVEL: info
       LOKI_URL: http://loki:3100
       # Ops Database

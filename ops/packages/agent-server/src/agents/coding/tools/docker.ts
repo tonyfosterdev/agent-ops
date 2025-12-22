@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import { tool } from 'ai';
 import { spawn } from 'child_process';
+import { config } from '../../../config';
 
 // Available services that can be restarted (app services only, no DBs or infra)
 const RESTARTABLE_SERVICES = [
@@ -22,8 +23,8 @@ export const restartServiceSchema = z.object({
   rebuild: z
     .boolean()
     .optional()
-    .default(false)
-    .describe('If true, rebuild the container before restarting. Use after code changes.'),
+    .default(true)
+    .describe('Rebuild the container before restarting. Set to false only for quick restart without code changes.'),
 });
 
 /**
@@ -34,7 +35,7 @@ async function execDockerCompose(
   args: string[]
 ): Promise<{ success: boolean; output: string; error?: string }> {
   return new Promise((resolve) => {
-    const proc = spawn('docker', ['compose', ...args], {
+    const proc = spawn('docker', ['compose', '-p', config.composeProjectName, ...args], {
       cwd: workDir,
       shell: false,
     });
@@ -81,24 +82,25 @@ async function execDockerCompose(
 export function createRestartServiceTool(workDir: string) {
   return tool({
     description:
-      'Restart a Docker service. Set rebuild=true after code changes to rebuild the container first. Returns docker compose output for verification.',
+      'Restart a Docker service. Rebuilds by default. Use rebuild=false only for quick restart without code changes. Returns docker compose output for verification.',
     parameters: restartServiceSchema,
     execute: async ({ service, rebuild }) => {
-      let result;
+      const projectName = config.composeProjectName;
+      const command = rebuild
+        ? `docker compose -p ${projectName} up -d --build --force-recreate --no-deps ${service}`
+        : `docker compose -p ${projectName} restart ${service}`;
 
-      if (rebuild) {
-        // Rebuild and restart: docker compose up -d --build <service>
-        result = await execDockerCompose(workDir, ['up', '-d', '--build', service]);
-      } else {
-        // Quick restart: docker compose restart <service>
-        result = await execDockerCompose(workDir, ['restart', service]);
-      }
+      const args = rebuild
+        ? ['up', '-d', '--build', '--force-recreate', '--no-deps', service]
+        : ['restart', service];
+
+      const result = await execDockerCompose(workDir, args);
 
       return {
         success: result.success,
         service,
         rebuild,
-        command: rebuild ? `docker compose up -d --build ${service}` : `docker compose restart ${service}`,
+        command,
         output: result.output,
         ...(result.error && { error: result.error }),
       };

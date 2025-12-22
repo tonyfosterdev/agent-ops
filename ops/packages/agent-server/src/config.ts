@@ -17,6 +17,7 @@ export const config = {
   },
 
   workDir: process.env.WORK_DIR || '/workspace',
+  composeProjectName: process.env.COMPOSE_PROJECT_NAME || 'agentops',
   lokiUrl: process.env.LOKI_URL || 'http://loki.localhost',
 
   // Ops Database (for Durable Runs)

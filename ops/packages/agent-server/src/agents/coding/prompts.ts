@@ -45,7 +45,7 @@ Log Analysis Tools (Loki):
 8. loki_service_errors: Quick error lookup for a service. Simpler than raw LogQL.
 
 Docker Service Management:
-9. restart_service: Restart a Docker service. Use rebuild=true after code changes to rebuild the container.
+9. restart_service: Restart a Docker service. Rebuilds by default. Use rebuild=false only for quick restart without code changes.
 
 LOG ANALYSIS WITH LOKI:
 When investigating errors or debugging issues, PREFER using Loki tools over:
@@ -62,10 +62,12 @@ Common LogQL patterns:
 Available services: store-api, warehouse-alpha, warehouse-beta, bookstore-ui
 
 WORKFLOW AFTER CODE CHANGES:
-After modifying code files, use restart_service with rebuild=true to apply changes:
+After modifying code files, restart the service to apply changes:
 1. Make code changes with write_file
-2. Use restart_service(service, rebuild=true) to rebuild and restart the container
-3. Check logs with loki_query to verify the fix
+2. Call restart_service(service) to rebuild and restart the container (rebuilds by default)
+3. Report the changes made
+
+Note: restart_service rebuilds by default. Only use rebuild=false for quick restarts when no code changed.
 
 Debugging workflow with Loki:
 1. Use loki_labels to discover available services
