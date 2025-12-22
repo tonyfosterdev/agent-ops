@@ -298,43 +298,54 @@ sequenceDiagram
 
 ### Server-Sent Events (SSE) Streaming
 
-Real-time updates are delivered via SSE:
+Real-time updates are delivered via SSE with **push-based architecture** (no polling):
 
 **Endpoint**: `GET /runs/:id/events`
 
-**Implementation**:
+**Implementation** (EventEmitter pub/sub):
 ```typescript
 return streamSSE(c, async (stream) => {
-  let lastSequence = -1;
+  const subscribedRuns = new Set<string>();
+  const unsubscribers = new Map<string, () => void>();
 
-  // Send all existing events
-  const events = await journalService.getEvents(runId);
-  for (const event of events) {
-    await stream.writeSSE({
-      data: JSON.stringify(event),
-      event: 'event',
-      id: event.id,
+  async function subscribeToRun(runId: string) {
+    if (subscribedRuns.has(runId)) return;
+    subscribedRuns.add(runId);
+
+    // Subscribe FIRST to capture events during fetch
+    const unsub = journalService.subscribe(runId, (event) => {
+      stream.writeSSE({ data: JSON.stringify(event), event: 'event' });
+      // Recursively subscribe to child runs
+      if (event.type === 'CHILD_RUN_STARTED') {
+        subscribeToRun(event.payload.child_run_id);
+      }
     });
-    lastSequence = event.sequence;
+    unsubscribers.set(runId, unsub);
+
+    // Send existing events
+    const events = await journalService.getEvents(runId);
+    for (const event of events) {
+      stream.writeSSE({ data: JSON.stringify(event), event: 'event' });
+      if (event.type === 'CHILD_RUN_STARTED') {
+        await subscribeToRun(event.payload.child_run_id);
+      }
+    }
   }
 
-  // Poll for new events (500ms interval)
-  while (status !== 'completed' && status !== 'failed') {
-    const newEvents = await journalService.getEventsSince(runId, lastSequence);
-    for (const event of newEvents) {
-      await stream.writeSSE({ data: JSON.stringify(event), event: 'event' });
-      lastSequence = event.sequence;
-    }
-    await sleep(500);
-  }
+  await subscribeToRun(runId);
+
+  // Cleanup on disconnect
+  stream.onAbort(() => {
+    for (const unsub of unsubscribers.values()) unsub();
+  });
 });
 ```
 
-**Why Polling vs WebSockets?**
-- Simpler implementation
-- Works with HTTP/1.1 infrastructure
-- Journal is source of truth (no lost events)
-- Sufficient latency for human interactions
+**Push Architecture Benefits**:
+- **Zero latency**: Events pushed immediately when appended to journal
+- **Single connection**: Parent + all child run events stream through one SSE
+- **No polling**: EventEmitter pub/sub eliminates database polling
+- **Efficient cleanup**: Subscriptions properly tracked and removed on disconnect
 
 ---
 
