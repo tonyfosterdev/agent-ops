@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { journalService } from '../services/JournalService';
+import { journalService, EnrichedJournalEvent } from '../services/JournalService';
 import { startRun, resumeRun, runAgentStep } from '../services/DurableLoop';
 import { logger } from '../config';
 import type { RunStatus, AgentType } from '../types/journal';
@@ -169,7 +169,14 @@ runsRouter.get('/:id/events/snapshot', async (c) => {
 });
 
 /**
- * GET /runs/:id/events - SSE stream of events
+ * GET /runs/:id/events - SSE stream of events with subscription-based push
+ *
+ * Uses EventEmitter pub/sub instead of polling. Automatically subscribes
+ * to child runs when CHILD_RUN_STARTED events are detected.
+ *
+ * Terminal state detection is event-driven: when RUN_COMPLETED, RUN_CANCELLED,
+ * or SYSTEM_ERROR events arrive for the parent run, the stream is closed.
+ * NO POLLING is used.
  */
 runsRouter.get('/:id/events', async (c) => {
   const runId = c.req.param('id');
@@ -180,11 +187,28 @@ runsRouter.get('/:id/events', async (c) => {
   }
 
   return streamSSE(c, async (stream) => {
-    let lastSequence = -1;
+    // Track ALL subscriptions for cleanup
+    const unsubscribers = new Map<string, () => void>();
+    const subscribedRuns = new Set<string>();
+    const sentSequences = new Map<string, Set<number>>();
 
-    // Send initial events
-    const initialEvents = await journalService.getEvents(runId);
-    for (const event of initialEvents) {
+    // Promise that resolves when the stream should close
+    let resolveStreamEnd: ((status: string) => void) | null = null;
+    const streamEndPromise = new Promise<string>((resolve) => {
+      resolveStreamEnd = resolve;
+    });
+
+    // Terminal event types that should close the stream (only for parent run)
+    const TERMINAL_EVENTS = new Set(['RUN_COMPLETED', 'RUN_CANCELLED', 'SYSTEM_ERROR']);
+
+    // Helper to send an event through SSE
+    const sendEvent = async (event: EnrichedJournalEvent): Promise<void> => {
+      // Dedupe by run_id + sequence
+      const runSeqs = sentSequences.get(event.source_run_id) || new Set();
+      if (runSeqs.has(event.sequence)) return;
+      runSeqs.add(event.sequence);
+      sentSequences.set(event.source_run_id, runSeqs);
+
       await stream.writeSSE({
         data: JSON.stringify({
           id: event.id,
@@ -192,56 +216,139 @@ runsRouter.get('/:id/events', async (c) => {
           type: event.event_type,
           payload: event.payload,
           created_at: event.created_at,
+          source_run_id: event.source_run_id,
+          source_agent_type: event.source_agent_type,
         }),
         event: 'event',
         id: event.id,
       });
-      lastSequence = event.sequence;
-    }
 
-    // Poll for new events
-    const pollInterval = 500; // 500ms
-    const maxPolls = 600; // 5 minutes max
-
-    for (let i = 0; i < maxPolls; i++) {
-      // Check if client disconnected
-      if (stream.aborted) {
-        break;
+      // Check for terminal events on the PARENT run only
+      if (event.source_run_id === runId && TERMINAL_EVENTS.has(event.event_type)) {
+        // Map event type to status
+        let status = 'completed';
+        if (event.event_type === 'RUN_CANCELLED') status = 'cancelled';
+        else if (event.event_type === 'SYSTEM_ERROR') status = 'failed';
+        resolveStreamEnd?.(status);
       }
+    };
 
-      // Check current run status
-      const currentRun = await journalService.getRun(runId);
-      if (!currentRun) break;
+    // Subscribe to a run and recursively subscribe to child runs
+    const subscribeToRun = async (targetRunId: string): Promise<void> => {
+      // SYNCHRONOUSLY mark as subscribed BEFORE any async work (fixes race condition)
+      if (subscribedRuns.has(targetRunId)) return;
+      subscribedRuns.add(targetRunId);
 
-      // Get new events
-      const newEvents = await journalService.getEventsSince(runId, lastSequence);
+      try {
+        // Get run metadata and cache agent type
+        const targetRun = await journalService.getRun(targetRunId);
+        const agentType = targetRun?.agent_type ?? null;
+        journalService.cacheAgentType(targetRunId, agentType);
 
-      for (const event of newEvents) {
-        await stream.writeSSE({
-          data: JSON.stringify({
+        // SUBSCRIBE FIRST to capture events during fetch (fixes race condition)
+        const pendingEvents: EnrichedJournalEvent[] = [];
+        const tempUnsub = journalService.subscribe(targetRunId, (event) => {
+          pendingEvents.push(event);
+        });
+        unsubscribers.set(targetRunId, tempUnsub);
+
+        // Fetch existing events
+        const existingEvents = await journalService.getEvents(targetRunId);
+        const existingSequences = new Set(existingEvents.map((e) => e.sequence));
+
+        // Send existing events with source metadata
+        for (const event of existingEvents) {
+          const enriched: EnrichedJournalEvent = {
             id: event.id,
             sequence: event.sequence,
-            type: event.event_type,
+            event_type: event.event_type,
             payload: event.payload,
             created_at: event.created_at,
-          }),
-          event: 'event',
-          id: event.id,
-        });
-        lastSequence = event.sequence;
-      }
+            source_run_id: targetRunId,
+            source_agent_type: agentType,
+          };
+          await sendEvent(enriched);
 
-      // Exit if run is in terminal state
-      if (currentRun.status === 'completed' || currentRun.status === 'failed' || currentRun.status === 'cancelled') {
+          // Subscribe to child runs
+          if (event.event_type === 'CHILD_RUN_STARTED') {
+            const childRunId = (event.payload as { child_run_id: string }).child_run_id;
+            if (childRunId) {
+              await subscribeToRun(childRunId);
+            }
+          }
+        }
+
+        // Send any queued events (dedupe by sequence)
+        for (const event of pendingEvents) {
+          if (!existingSequences.has(event.sequence)) {
+            await sendEvent(event);
+            if (event.event_type === 'CHILD_RUN_STARTED') {
+              const childRunId = (event.payload as { child_run_id: string }).child_run_id;
+              if (childRunId) {
+                await subscribeToRun(childRunId);
+              }
+            }
+          }
+        }
+
+        // Replace temporary subscription with live one
+        unsubscribers.get(targetRunId)?.();
+        const liveUnsub = journalService.subscribe(targetRunId, async (event) => {
+          await sendEvent(event);
+          if (event.event_type === 'CHILD_RUN_STARTED') {
+            const childRunId = (event.payload as { child_run_id: string }).child_run_id;
+            if (childRunId) {
+              await subscribeToRun(childRunId);
+            }
+          }
+        });
+        unsubscribers.set(targetRunId, liveUnsub);
+      } catch (error) {
+        subscribedRuns.delete(targetRunId); // Cleanup on failure
+        logger.error({ error, runId: targetRunId }, 'Failed to subscribe to run');
+        throw error;
+      }
+    };
+
+    // Start with parent run
+    await subscribeToRun(runId);
+
+    // Check if run is already in terminal state (handle reconnects)
+    const currentRun = await journalService.getRun(runId);
+    if (
+      currentRun &&
+      (currentRun.status === 'completed' ||
+        currentRun.status === 'failed' ||
+        currentRun.status === 'cancelled')
+    ) {
+      await stream.writeSSE({
+        data: JSON.stringify({ status: currentRun.status }),
+        event: 'done',
+      });
+    } else {
+      // Wait for terminal event - abort is handled by stream cleanup on disconnect.
+      // The streamEndPromise resolves when a terminal event (RUN_COMPLETED, RUN_CANCELLED,
+      // SYSTEM_ERROR) is received. The stream will be cleaned up automatically when
+      // the client disconnects.
+      const status = await streamEndPromise;
+      if (!stream.aborted) {
         await stream.writeSSE({
-          data: JSON.stringify({ status: currentRun.status }),
+          data: JSON.stringify({ status }),
           event: 'done',
         });
-        break;
       }
+    }
 
-      // Wait before next poll
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    // Cleanup all subscriptions
+    for (const unsub of unsubscribers.values()) {
+      unsub();
+    }
+    unsubscribers.clear();
+    subscribedRuns.clear();
+
+    // Clean up agent type cache for all subscribed runs
+    for (const cachedRunId of sentSequences.keys()) {
+      journalService.cleanupCache(cachedRunId);
     }
   });
 });

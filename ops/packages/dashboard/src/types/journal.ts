@@ -23,6 +23,8 @@ export interface JournalEvent {
   type: JournalEventType;
   payload: Record<string, unknown>;
   created_at: string;
+  source_run_id?: string;
+  source_agent_type?: string;
 }
 
 export interface PendingTool {

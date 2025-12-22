@@ -1,12 +1,29 @@
+import { EventEmitter } from 'events';
 import { AppDataSource } from '../database';
 import { Run } from '../entities/Run';
 import { JournalEntry } from '../entities/JournalEntry';
 import type { JournalEvent, RunStatus, AgentType } from '../types/journal';
 import { logger } from '../config';
 
+/**
+ * Enriched journal event with source run metadata.
+ * Used when streaming events through SSE to distinguish events from different runs.
+ */
+export interface EnrichedJournalEvent {
+  id: string;
+  sequence: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: Date;
+  source_run_id: string;
+  source_agent_type: string | null;
+}
+
 export class JournalService {
   private runRepository = AppDataSource.getRepository(Run);
   private entryRepository = AppDataSource.getRepository(JournalEntry);
+  private emitter = new EventEmitter();
+  private agentTypeCache = new Map<string, string | null>();
 
   /**
    * Create a new run
@@ -49,7 +66,7 @@ export class JournalService {
   }
 
   /**
-   * Append an event to the journal
+   * Append an event to the journal and emit to subscribers
    */
   async appendEvent(runId: string, event: JournalEvent): Promise<void> {
     // Get next sequence number
@@ -66,8 +83,23 @@ export class JournalService {
       payload: event.payload as unknown as Record<string, unknown>,
     });
 
-    await this.entryRepository.save(entry);
+    const saved = await this.entryRepository.save(entry);
     logger.debug({ runId, eventType: event.type, sequence }, 'Appended event');
+
+    // Get cached agent type (set at run creation or subscription)
+    const agentType = this.agentTypeCache.get(runId) ?? null;
+
+    // Emit enriched event synchronously after save - no async in emit path
+    const enriched: EnrichedJournalEvent = {
+      id: saved.id,
+      sequence: saved.sequence,
+      event_type: saved.event_type,
+      payload: saved.payload,
+      created_at: saved.created_at,
+      source_run_id: runId,
+      source_agent_type: agentType,
+    };
+    this.emitter.emit(`run:${runId}`, enriched);
   }
 
   /**
@@ -210,6 +242,37 @@ export class JournalService {
     }
 
     return null;
+  }
+
+  /**
+   * Cache agent type for a run to avoid async lookup in emit path
+   */
+  cacheAgentType(runId: string, agentType: string | null): void {
+    this.agentTypeCache.set(runId, agentType);
+  }
+
+  /**
+   * Subscribe to events for a run
+   * @returns Unsubscribe function
+   */
+  subscribe(runId: string, callback: (event: EnrichedJournalEvent) => void): () => void {
+    // Wrap callback in try-catch to prevent errors from crashing emit
+    const safeCallback = (event: EnrichedJournalEvent) => {
+      try {
+        callback(event);
+      } catch (error) {
+        logger.error({ error, runId }, 'Error in subscription callback');
+      }
+    };
+    this.emitter.on(`run:${runId}`, safeCallback);
+    return () => this.emitter.off(`run:${runId}`, safeCallback);
+  }
+
+  /**
+   * Clean up cache when run reaches terminal state
+   */
+  cleanupCache(runId: string): void {
+    this.agentTypeCache.delete(runId);
   }
 }
 
