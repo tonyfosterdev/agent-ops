@@ -151,7 +151,9 @@ function flushAssistantMessage(
 }
 
 /**
- * Get tools for a run using agent definition, with dangerous tools having their execute function stripped
+ * Get tools for a run using agent definition.
+ * Strips execute from ALL tools to give us full control over event ordering.
+ * Returns a Map of raw execute functions for manual execution.
  */
 function getToolsForRun(run: Run) {
   const definition = loadAgentDefinition(run.agent_type);
@@ -165,22 +167,25 @@ function getToolsForRun(run: Run) {
 
   const allTools = definition.getTools(context);
 
-  // For dangerous tools, strip the execute function
-  // This allows the AI to propose the tool call, but prevents auto-execution
+  // Store raw execute functions for manual execution
+  const executeFunctions = new Map<string, (args: Record<string, unknown>) => Promise<unknown>>();
+
+  // Strip execute from ALL tools for LLM - this prevents SDK auto-execution
+  // and gives us full control over event ordering (TOOL_PROPOSED before execution)
   const preparedTools: Record<string, any> = {};
 
   for (const [name, tool] of Object.entries(allTools)) {
-    if (isDangerousTool(name)) {
-      // Strip execute to prevent auto-execution
-      const { execute, ...rest } = tool as any;
-      preparedTools[name] = rest;
-    } else {
-      // Safe tools keep execute for auto-execution
-      preparedTools[name] = tool;
+    const toolAny = tool as any;
+    // Save execute function before stripping
+    if (typeof toolAny.execute === 'function') {
+      executeFunctions.set(name, toolAny.execute);
     }
+    // Strip execute from ALL tools
+    const { execute, ...rest } = toolAny;
+    preparedTools[name] = rest;
   }
 
-  return { allTools, preparedTools };
+  return { preparedTools, executeFunctions };
 }
 
 /**
@@ -208,7 +213,7 @@ async function executeSingleStep(runId: string): Promise<{
   const events = await journalService.getEvents(runId);
   const messages = projectToPrompt(events, run.prompt);
 
-  const { allTools, preparedTools } = getToolsForRun(run);
+  const { preparedTools, executeFunctions } = getToolsForRun(run);
   const systemPrompt = getSystemPromptForRun(run);
 
   try {
@@ -228,20 +233,23 @@ async function executeSingleStep(runId: string): Promise<{
       });
     }
 
-    // Process tool calls
+    // Process tool calls - we now manually execute ALL tools after recording TOOL_PROPOSED
+    // This gives us full control over event ordering (TOOL_PROPOSED before any execution)
     const toolCalls = result.toolCalls || [];
 
     for (const toolCall of toolCalls) {
+      // Record TOOL_PROPOSED FIRST for ALL tools (before any execution)
+      await journalService.appendEvent(runId, {
+        type: 'TOOL_PROPOSED',
+        payload: {
+          tool_name: toolCall.toolName,
+          args: toolCall.args as Record<string, unknown>,
+          call_id: toolCall.toolCallId,
+        },
+      });
+
       if (isDangerousTool(toolCall.toolName)) {
         // Dangerous tool - suspend for approval
-        await journalService.appendEvent(runId, {
-          type: 'TOOL_PROPOSED',
-          payload: {
-            tool_name: toolCall.toolName,
-            args: toolCall.args as Record<string, unknown>,
-            call_id: toolCall.toolCallId,
-          },
-        });
         await journalService.appendEvent(runId, {
           type: 'RUN_SUSPENDED',
           payload: { reason: `Dangerous tool requires approval: ${toolCall.toolName}` },
@@ -259,27 +267,42 @@ async function executeSingleStep(runId: string): Promise<{
         };
       }
 
-      // Safe tool - already executed by SDK, record both proposal and result
-      // Record TOOL_PROPOSED first (for conversation reconstruction)
-      await journalService.appendEvent(runId, {
-        type: 'TOOL_PROPOSED',
-        payload: {
-          tool_name: toolCall.toolName,
-          args: toolCall.args as Record<string, unknown>,
-          call_id: toolCall.toolCallId,
-        },
-      });
-
-      // Then record the result
-      const toolResult = result.toolResults?.find((r) => r.toolCallId === toolCall.toolCallId);
-      await journalService.appendEvent(runId, {
-        type: 'TOOL_RESULT',
-        payload: {
-          call_id: toolCall.toolCallId,
-          output_data: toolResult?.result ?? null,
-          status: 'success',
-        },
-      });
+      // Safe tool - execute manually NOW (AFTER TOOL_PROPOSED recorded)
+      // This ensures proper event ordering for delegation tools
+      const executeFunc = executeFunctions.get(toolCall.toolName);
+      if (executeFunc) {
+        try {
+          const toolResult = await executeFunc(toolCall.args as Record<string, unknown>);
+          await journalService.appendEvent(runId, {
+            type: 'TOOL_RESULT',
+            payload: {
+              call_id: toolCall.toolCallId,
+              output_data: toolResult,
+              status: 'success',
+            },
+          });
+        } catch (error: any) {
+          await journalService.appendEvent(runId, {
+            type: 'TOOL_RESULT',
+            payload: {
+              call_id: toolCall.toolCallId,
+              output_data: { error: error.message },
+              status: 'error',
+            },
+          });
+        }
+      } else {
+        // No execute function found - record error result
+        logger.warn({ runId, toolName: toolCall.toolName }, 'No execute function found for tool');
+        await journalService.appendEvent(runId, {
+          type: 'TOOL_RESULT',
+          payload: {
+            call_id: toolCall.toolCallId,
+            output_data: { error: `No execute function found for tool: ${toolCall.toolName}` },
+            status: 'error',
+          },
+        });
+      }
     }
 
     // Increment step counter
@@ -395,6 +418,24 @@ export async function resumeRun(
     throw new Error(`Cannot resume run with status: ${run.status}`);
   }
 
+  // Check if this run is suspended due to a child run needing HITL approval
+  // If so, forward the resume to the child run instead
+  const events = await journalService.getEvents(runId);
+  const lastSuspended = [...events].reverse().find(e => e.event_type === 'RUN_SUSPENDED');
+
+  if (lastSuspended) {
+    const suspendedPayload = lastSuspended.payload as { blocked_by_child_run_id?: string };
+    if (suspendedPayload.blocked_by_child_run_id) {
+      logger.info(
+        { runId, childRunId: suspendedPayload.blocked_by_child_run_id },
+        'Forwarding resume to child run'
+      );
+      // Forward resume to child run - don't record anything on parent yet
+      await resumeRun(suspendedPayload.blocked_by_child_run_id, decision, feedback);
+      return;
+    }
+  }
+
   // Record the decision
   await journalService.appendEvent(runId, {
     type: 'RUN_RESUMED',
@@ -402,17 +443,21 @@ export async function resumeRun(
   });
 
   if (decision === 'approved') {
-    // Execute the pending tool
-    const events = await journalService.getEvents(runId);
+    // Execute the pending tool using raw execute functions
     const pendingTool = journalService.findPendingTool(events);
 
     if (pendingTool) {
-      const { allTools } = getToolsForRun(run);
-      const tool = allTools[pendingTool.tool_name as keyof typeof allTools];
+      const { executeFunctions } = getToolsForRun(run);
+      const executeFunc = executeFunctions.get(pendingTool.tool_name);
 
-      if (tool && 'execute' in tool) {
+      logger.debug(
+        { runId, toolName: pendingTool.tool_name, hasExecuteFunc: !!executeFunc },
+        'Resuming approved tool execution'
+      );
+
+      if (executeFunc) {
         try {
-          const result = await (tool as any).execute(pendingTool.args);
+          const result = await executeFunc(pendingTool.args);
 
           await journalService.appendEvent(runId, {
             type: 'TOOL_RESULT',
@@ -432,6 +477,19 @@ export async function resumeRun(
             },
           });
         }
+      } else {
+        logger.error(
+          { runId, toolName: pendingTool.tool_name },
+          'No execute function found for approved tool'
+        );
+        await journalService.appendEvent(runId, {
+          type: 'TOOL_RESULT',
+          payload: {
+            call_id: pendingTool.call_id,
+            output_data: { error: `No execute function found for tool: ${pendingTool.tool_name}` },
+            status: 'error',
+          },
+        });
       }
     }
   }
