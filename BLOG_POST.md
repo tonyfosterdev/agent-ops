@@ -1,4 +1,4 @@
-# Building Durable AI Agents with Event Sourcing and Human-in-the-Loop
+# Building Durable AI Agents: Event Sourcing, State Machines, and Humans in the Middle
 
 *What if AI agents could pause mid-task, wait for human approval, and resume exactly where they left off—even after a server crash?*
 
@@ -6,7 +6,7 @@
 
 Building on my [previous ops agent project](https://tonyfoster.dev/building-an-ai-ops-agent), I wanted to solve a fundamental problem: **how do you give AI agents real power without giving them too much rope?**
 
-The answer came from an unexpected place—event sourcing, a pattern I'd used for years in distributed systems. By treating agent execution as a series of immutable events rather than ephemeral state, I could build agents that are durable, auditable, and interruptible.
+The answer required combining three patterns: **event sourcing** for durability, a **state machine** for control flow, and **human-in-the-loop** for safety. The result is a durable execution loop that's more complex than I expected—but the complexity is essential.
 
 ## The Problem: Autonomous Agents Are Dangerous
 
@@ -21,9 +21,25 @@ The traditional solutions felt inadequate:
 
 I needed agents that could *propose* dangerous actions, *pause* for human review, and *resume* seamlessly after approval—without losing any state.
 
-## The Solution: Event-Sourced Agents
+## Human in the Middle: The Core Philosophy
 
-Here's the key insight: if you record every action as an immutable event in a journal, you get durability and human-in-the-loop for free.
+The key insight is that **humans shouldn't be at the end of the loop—they should be in the middle**.
+
+Traditional automation: `Input → Agent → Output`
+
+Human-in-the-loop: `Input → Agent → [PAUSE] → Human Review → Agent → Output`
+
+The agent does the investigation, analysis, and solution design. The human just validates that the proposed action is correct. This is the sweet spot: agents handle the tedious work, humans provide judgment on high-stakes decisions.
+
+But implementing this requires solving two hard problems:
+1. **Durability**: The agent must remember everything when it resumes
+2. **Control**: The agent must stop exactly when we want it to
+
+Event sourcing and state machines solve these problems.
+
+## Event Sourcing: The Foundation
+
+Here's the key insight: if you record every action as an immutable event in a journal, you get durability for free.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -41,40 +57,51 @@ Here's the key insight: if you record every action as an immutable event in a jo
 └─────────────────────────────────────────────────┘
 ```
 
-The journal becomes the single source of truth. To know the current state, replay the events. To resume after a crash, replay the events. To audit what happened, read the events.
+The journal becomes the single source of truth:
+- **Current state?** Replay the events
+- **Resume after crash?** Replay the events
+- **Audit what happened?** Read the events
 
-This is event sourcing applied to AI agents.
+If you've worked with event sourcing in distributed systems, this should feel familiar:
 
-## The State Machine
+| Traditional Event Sourcing | Agent Event Sourcing |
+|---------------------------|---------------------|
+| Events are facts | Every agent action is an event |
+| State is derived | Run state computed from events |
+| Append-only log | Journal is immutable |
+| Event replay | Resume suspended runs |
+| Projections | Message reconstruction for LLM |
 
-Every agent run follows a simple state machine:
+The `projectToPrompt()` function is essentially an event projection—it transforms the raw event stream into the format the LLM expects.
 
+## The State Machine: Controlling Agent Lifecycle
+
+Every agent run follows a state machine:
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending : Run created
+    pending --> running : RUN_STARTED
+    running --> suspended : Dangerous tool proposed
+    running --> completed : Agent finished
+    running --> failed : SYSTEM_ERROR
+    suspended --> running : RUN_RESUMED (approved/rejected)
+    running --> cancelled : User cancellation
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
 ```
-          ┌──────────────────────────────────────┐
-          │                                      │
-          ▼                                      │
-      ┌───────┐     RUN_STARTED     ┌─────────┐  │
-─────▶│pending│────────────────────▶│ running │  │
-      └───────┘                     └────┬────┘  │
-                                         │       │
-              ┌──────────────────────────┼───────┘
-              │                          │
-              │ dangerous tool           │ agent done
-              ▼                          ▼
-        ┌───────────┐              ┌───────────┐
-        │ suspended │              │ completed │
-        └─────┬─────┘              └───────────┘
-              │
-              │ approved/rejected
-              │
-              └──────▶ running
-```
 
-Five states, clear transitions, fully deterministic. The magic happens in the `suspended` state—that's where human oversight lives.
+Six states, clear transitions, fully deterministic. The magic happens in the `suspended` state—that's where human oversight lives.
 
-## The DurableLoop: One Step at a Time
+The state machine ensures we always know exactly where an agent is in its lifecycle. Combined with event sourcing, we can:
+- Resume a suspended run after server restart
+- Cancel a running agent gracefully
+- Audit the complete history of state transitions
 
-The core execution engine—I call it the DurableLoop—has one crucial constraint:
+## The DurableLoop: Where Complexity Lives
+
+Here's where it gets interesting. The core execution engine—the DurableLoop—has one crucial constraint:
 
 ```typescript
 const result = await generateText({
@@ -86,60 +113,115 @@ const result = await generateText({
 });
 ```
 
-**`maxSteps: 1`**. This is the key.
+**`maxSteps: 1`**. This is the key to durability.
 
 After every single LLM interaction, we persist state to the journal. If the server crashes, we lose nothing—just replay the journal and pick up where we left off.
 
-This is different from the typical "let the LLM run until it's done" approach. That approach is fragile. Memory is volatile. A crash means starting over. And there's no opportunity to intervene.
+But this constraint creates complexity. The DurableLoop must handle:
 
-With single-step execution:
-1. LLM produces response
-2. We record events to journal
-3. If tool is dangerous, we suspend
-4. Human reviews, approves/rejects
-5. We record decision to journal
-6. Execution continues
+### 1. Tool Stripping for HITL
 
-Every step is a checkpoint.
-
-## Tool Stripping: The Clever Bit
-
-How do you let the LLM *propose* a dangerous tool without *executing* it? You strip the `execute` function.
+We can't let the LLM auto-execute dangerous tools. So we strip the `execute` function:
 
 ```typescript
 for (const [name, tool] of Object.entries(allTools)) {
-  if (isDangerousTool(name)) {
-    // Remove the execute function entirely
-    const { execute, ...rest } = tool;
-    preparedTools[name] = rest;
-  } else {
-    preparedTools[name] = tool;
+  // Save execute function for later
+  if (typeof tool.execute === 'function') {
+    executeFunctions.set(name, tool.execute);
   }
+  // Strip execute from ALL tools
+  const { execute, ...rest } = tool;
+  preparedTools[name] = rest;
 }
 ```
 
-The Vercel AI SDK still sends the tool definition to the LLM—it knows the tool exists, what parameters it takes, when to use it. But when the LLM tries to call it, there's no `execute` function, so it returns immediately with a tool call proposal but no result.
+The LLM sees the tool, proposes using it, but can't execute it. We execute manually after recording the proposal.
 
-The DurableLoop catches this:
+### 2. Event Ordering
+
+Events must be recorded in the correct order. For safe tools:
+1. Record `TOOL_PROPOSED`
+2. Execute the tool
+3. Record `TOOL_RESULT`
+
+If we execute before recording the proposal, child agent events appear before the parent's proposal in the timeline—confusing for users and breaking the audit trail.
+
+### 3. Parent-Child Run Coordination
+
+When an orchestrator delegates to a sub-agent, both runs share the same HITL flow. If the child needs approval:
+1. Child run suspends
+2. Parent run also suspends (blocked by child)
+3. User approves on parent
+4. Approval forwards to child
+5. Child executes, completes
+6. Parent resumes
 
 ```typescript
-if (isDangerousTool(toolCall.toolName)) {
-  // Record the proposal
-  await journal.appendEvent({ type: 'TOOL_PROPOSED', ... });
-  // Suspend the run
-  await journal.appendEvent({ type: 'RUN_SUSPENDED', ... });
-  await journal.updateStatus('suspended');
-  return; // Stop here, wait for human
+// Check if suspended due to child needing HITL (find LAST suspended event)
+const lastSuspended = [...events].reverse().find(e => e.event_type === 'RUN_SUSPENDED');
+if (lastSuspended?.payload.blocked_by_child_run_id) {
+  // Forward resume to child run
+  await resumeRun(lastSuspended.payload.blocked_by_child_run_id, decision);
+  return;
 }
 ```
 
-The agent proposes, the human disposes.
+### 4. Message Reconstruction
+
+After resume, we rebuild the LLM conversation from events:
+
+```typescript
+function projectToPrompt(events, originalPrompt): CoreMessage[] {
+  const messages = [{ role: 'user', content: originalPrompt }];
+
+  for (const event of events) {
+    switch (event.event_type) {
+      case 'AGENT_THOUGHT':
+        // Becomes assistant message with text
+        break;
+      case 'TOOL_PROPOSED':
+        // Becomes tool_call in assistant message
+        break;
+      case 'TOOL_RESULT':
+        // Becomes tool result message
+        break;
+      case 'RUN_RESUMED':
+        // Rejection feedback becomes user message
+        if (payload.decision === 'rejected') {
+          messages.push({ role: 'user', content: `Rejected: ${payload.feedback}` });
+        }
+        break;
+    }
+  }
+  return messages;
+}
+```
+
+This is where event sourcing shines—the projection gives us exactly the conversation state we need.
+
+## Real-Time Event Streaming
+
+How does the Dashboard know when to show the approval UI? Server-Sent Events (SSE) with push-based architecture.
+
+```typescript
+// Server pushes events as they're written
+journalService.subscribe(runId, (event) => {
+  stream.writeSSE({ data: JSON.stringify(event), event: 'event' });
+
+  // Recursively subscribe to child runs
+  if (event.type === 'CHILD_RUN_STARTED') {
+    subscribeToRun(event.payload.child_run_id);
+  }
+});
+```
+
+No polling. Events stream immediately when written to the journal. Parent and child run events flow through a single SSE connection.
 
 ## The Approval UI
 
 When a run suspends, the Dashboard shows an inline approval component:
 
-**[Screenshot recommendation: Dashboard showing suspended run with orange APPROVAL REQUIRED banner, shell_command_execute tool with "npm run build" arguments, Approve/Reject buttons]**
+![Dashboard Demo](docs/assets/dashboard-demo.gif)
 
 The interface is intentionally simple:
 - Orange highlight screams "PAY ATTENTION"
@@ -149,195 +231,86 @@ The interface is intentionally simple:
 
 When rejected, the feedback gets injected as a user message. The agent sees: "Tool execution was rejected: Please don't run build commands, just read the tests." It can then reconsider its approach.
 
-## Real-Time Event Streaming
+## A Real Example
 
-How does the Dashboard know when to show the approval UI? Server-Sent Events (SSE).
+Here's a real debugging session:
 
-```typescript
-// Client connects to SSE stream
-const eventSource = new EventSource(`/runs/${runId}/events`);
+**1. User submits**: "The store-api is returning 500 errors. Fix it."
 
-eventSource.addEventListener('event', (e) => {
-  const event = JSON.parse(e.data);
+**2. Orchestrator delegates** to log analyzer agent
 
-  if (event.type === 'RUN_SUSPENDED') {
-    showApprovalUI(event.pendingTool);
-  }
-});
-```
+**3. Log analyzer** queries Loki, finds error in `bookService.ts:12`
 
-The server streams events as they're written to the journal. New thought? Streamed. Tool proposed? Streamed. Run suspended? Streamed immediately.
+**4. Orchestrator delegates** to coding agent with specific file
 
-I chose polling-based SSE over WebSockets for simplicity. The server polls the journal for new events every 500ms and streams any new ones. The journal is the source of truth, not the WebSocket connection state. If a client disconnects and reconnects, it just replays from the last event ID it saw.
+**5. Coding agent** reads file, proposes fix via `write_file`
 
-This is the event sourcing mindset: the journal knows everything, everyone else just subscribes to it.
+**6. Run suspends** for human approval
 
-## Relating to Event Sourcing
+**7. Human reviews** the diff, clicks "Approve"
 
-If you've worked with event sourcing in distributed systems, this architecture should feel familiar:
+**8. File written**, coding agent proposes `restart_service`
 
-| Traditional Event Sourcing | Agent Event Sourcing |
-|---------------------------|---------------------|
-| Events are facts | Every agent action is an event |
-| State is derived | Run state computed from events |
-| Append-only log | Journal is immutable |
-| Event replay | Resume suspended runs |
-| Projections | Message reconstruction for LLM |
+**9. Run suspends** again for restart approval
 
-The `projectToPrompt()` function is essentially an event projection—it transforms the raw event stream into the format the LLM expects (user messages, assistant messages, tool calls, tool results).
+**10. Human approves**, service restarts
 
-```typescript
-function projectToPrompt(events, originalPrompt): CoreMessage[] {
-  const messages = [{ role: 'user', content: originalPrompt }];
+**11. Run completes** with summary
 
-  for (const event of events) {
-    switch (event.type) {
-      case 'AGENT_THOUGHT':
-        // Becomes assistant message
-        break;
-      case 'TOOL_PROPOSED':
-        // Becomes tool_call in assistant message
-        break;
-      case 'TOOL_RESULT':
-        // Becomes tool result message
-        break;
-    }
-  }
+Total events: ~15. Human interventions: 2. The agents did investigation, analysis, and solution design. The human just validated the dangerous actions.
 
-  return messages;
-}
-```
+## Why This Is Complicated
 
-Different projections could give you different views: a timeline for the UI, a conversation for the LLM, an audit log for compliance.
+I won't pretend this architecture is simple. The DurableLoop handles:
 
-## Agent Isolation Through Orchestration
+- **Single-step execution** with journal persistence
+- **Tool stripping** to prevent auto-execution
+- **Manual tool execution** with proper event ordering
+- **State machine transitions** across 6 states
+- **Parent-child coordination** for nested agent runs
+- **Message projection** for LLM context reconstruction
+- **Resume forwarding** when parent is blocked by child
+- **Error handling** at every step
 
-When the Orchestration Agent delegates to the Coding Agent, how do we keep their events separate? Simple: sub-agents don't write to the journal at all.
+Each of these interacts with the others. Get the event ordering wrong, and the timeline is confusing. Get the resume forwarding wrong, and child approvals break. Get the projection wrong, and the LLM loses context.
 
-```typescript
-// In the orchestrator's delegation tool
-execute: async ({ task }) => {
-  const agent = await createCodingAgent(config);
-  const result = await agent.run(task);  // Returns AgentResult, not events
-  await agent.shutdown();
-  return result;  // Passed back as tool result
-}
-```
+## Lessons Learned: Use a Framework
 
-The sub-agent runs to completion and returns a structured result. The orchestrator sees this as a tool result, records it to its journal, and continues. No cross-agent event contamination.
+Building this from scratch was educational. I now deeply understand:
+- How event sourcing applies to AI agents
+- Why state machines matter for agent lifecycle
+- The subtleties of human-in-the-loop coordination
+- How LLM tool calling actually works under the hood
 
-This is intentional. The orchestrator is the coordinator—it maintains the durable state. Sub-agents are workers—they execute and return results. If a sub-agent needs HITL, that's a future enhancement (nested durable runs).
+But if I were building this for production, **I would use an agent framework**.
 
-## What Happened: A Real Example
+Frameworks like [LangGraph](https://langchain-ai.github.io/langgraph/), [CrewAI](https://www.crewai.com/), or [Temporal](https://temporal.io/) with AI extensions handle much of this complexity:
+- Durable execution with checkpointing
+- State machine definitions
+- Human-in-the-loop primitives
+- Tool management
 
-Let me walk through a real debugging session:
+The patterns I implemented manually—event sourcing, state machines, tool stripping—are built into these frameworks. They've solved the edge cases I discovered the hard way.
 
-**1. User submits prompt**
-```
-"The store-api is returning 500 errors on the /orders endpoint. Fix it."
-```
-
-**2. RUN_STARTED**
-```json
-{ "type": "RUN_STARTED", "payload": { "prompt": "...", "user_id": "admin" }}
-```
-
-**3. Agent thinks**
-```json
-{ "type": "AGENT_THOUGHT", "payload": {
-  "text_content": "I'll query Loki for recent errors from store-api..."
-}}
-```
-
-**4. Safe tool executes automatically**
-```json
-{ "type": "TOOL_PROPOSED", "payload": { "tool_name": "loki_query", "args": {...} }}
-{ "type": "TOOL_RESULT", "payload": { "output_data": "TypeError: Cannot read property..." }}
-```
-
-**5. Agent proposes dangerous tool**
-```json
-{ "type": "TOOL_PROPOSED", "payload": {
-  "tool_name": "write_file",
-  "args": { "path": "src/routes/orders.ts", "content": "..." }
-}}
-{ "type": "RUN_SUSPENDED", "payload": { "reason": "Dangerous tool requires approval" }}
-```
-
-**6. Human reviews, approves**
-
-The Dashboard shows the diff. The fix looks correct. Click "Approve."
-
-```json
-{ "type": "RUN_RESUMED", "payload": { "decision": "approved" }}
-{ "type": "TOOL_RESULT", "payload": { "output_data": { "success": true }}}
-```
-
-**7. Agent proposes restart**
-```json
-{ "type": "TOOL_PROPOSED", "payload": { "tool_name": "restart_service", "args": { "service": "store-api" }}}
-{ "type": "RUN_SUSPENDED", "payload": { "reason": "Dangerous tool requires approval" }}
-```
-
-**8. Human approves again**
-
-```json
-{ "type": "RUN_RESUMED", "payload": { "decision": "approved" }}
-{ "type": "TOOL_RESULT", "payload": { "output_data": { "success": true }}}
-```
-
-**9. Run completes**
-```json
-{ "type": "RUN_COMPLETED", "payload": { "summary": "Fixed null reference error in orders.ts" }}
-```
-
-Total events: 12. Total human interventions: 2. The agent did the investigation and proposed the fix. The human just verified it was correct.
-
-## Key Design Decisions
-
-### Why `maxSteps: 1`?
-
-Crash recovery. If we let the LLM run for 10 steps before persisting, and crash after step 7, we lose steps 1-7. With `maxSteps: 1`, we persist after every step. Maximum overhead, maximum durability.
-
-Is it slower? Yes. Is it worth it? For operations work where a single bad command can cause an outage, absolutely.
-
-### Why Strip Execute Instead of Using Permissions?
-
-Simpler mental model. The LLM doesn't know about permissions—it just knows "I have these tools." By stripping `execute`, we don't need to teach the LLM about approval flows. It proposes tools naturally, and the infrastructure handles the rest.
-
-### Why Polling Instead of Real-Time Notifications?
-
-The journal is the source of truth. If we add a separate notification channel (WebSocket push, message queue), we now have two sources of truth that can diverge. Polling the journal ensures consistency—the same events the Dashboard sees are the same events that will be replayed on recovery.
-
-500ms polling latency is acceptable for human review. If you need sub-100ms latency, you're probably building a different kind of system.
-
-## Graphics Recommendations
-
-For a visual version of this post, I'd suggest:
-
-1. **State Machine Diagram**: Mermaid or custom graphic showing the 5 states and transitions
-2. **Event Timeline Screenshot**: Dashboard showing a real run with color-coded events (green for start/complete, blue for thoughts, yellow for tool proposals, orange for suspended)
-3. **Approval UI Screenshot**: The inline approval component with the orange highlight and Approve/Reject buttons
-4. **Architecture Diagram**: System overview showing CLI, Dashboard, Server, DurableLoop, and Journal
-5. **Sequence Diagram**: Full event flow from user prompt to completion
+This project was a great learning experience. It showed me *why* these frameworks exist and *what problems* they solve. But for production AI agents, don't reinvent the wheel.
 
 ## What's Next
 
 This architecture enables some interesting future work:
 
 - **Approval Policies**: Auto-approve `npm test` but require approval for `npm publish`
-- **Nested Durable Runs**: Sub-agents with their own HITL flows
 - **Time Travel Debugging**: Replay events to any point in the run
 - **Collaborative Approval**: Multiple humans must approve high-risk operations
 
-The foundation is solid. Event sourcing gives us durability, auditability, and extensibility. Human-in-the-loop gives us safety. Together, they let us build AI agents that are genuinely useful for operations work without being genuinely dangerous.
+The foundation is solid. Event sourcing gives us durability and auditability. The state machine gives us control. Human-in-the-loop gives us safety. Together, they let us build AI agents that are genuinely useful for operations work without being genuinely dangerous.
 
 ---
 
-The full source code is available at [github.com/yourusername/agentops](https://github.com/yourusername/agentops). The key files are:
+The full source code is available at [github.com/tonyfosterdev/agentops](https://github.com/tonyfosterdev/agentops). The key files are:
 
-- `ops/packages/agent-server/src/services/DurableLoop.ts` - Core state machine
+- `ops/packages/agent-server/src/services/DurableLoop.ts` - Core execution loop
+- `ops/packages/agent-server/src/services/JournalService.ts` - Event sourcing
 - `ops/packages/agent-server/src/types/journal.ts` - Event type definitions
 - `ops/packages/dashboard/src/components/Timeline.tsx` - Approval UI
 
-Questions? Find me on Twitter [@yourhandle](https://twitter.com/yourhandle).
+Questions? Find me on Twitter [@tonyfosterdev](https://twitter.com/tonyfosterdev).
