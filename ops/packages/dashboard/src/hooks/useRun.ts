@@ -8,6 +8,7 @@ interface UseRunResult {
   isLoading: boolean;
   error: string | null;
   parentRunId: string | null;
+  agentType: string | null;
 }
 
 const API_BASE = '';
@@ -19,6 +20,7 @@ export function useRun(runId: string | null): UseRunResult {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [parentRunId, setParentRunId] = useState<string | null>(null);
+  const [agentType, setAgentType] = useState<string | null>(null);
 
   useEffect(() => {
     if (!runId) {
@@ -26,6 +28,7 @@ export function useRun(runId: string | null): UseRunResult {
       setStatus('pending');
       setPendingTool(null);
       setParentRunId(null);
+      setAgentType(null);
       setIsLoading(false);
       return;
     }
@@ -33,11 +36,12 @@ export function useRun(runId: string | null): UseRunResult {
     setIsLoading(true);
     setError(null);
 
-    // Fetch run metadata to get parent_run_id
+    // Fetch run metadata to get parent_run_id and agent_type
     fetch(`${API_BASE}/runs/${runId}`)
       .then((res) => res.json())
       .then((data) => {
         setParentRunId(data.parent_run_id || null);
+        setAgentType(data.agent_type || null);
       })
       .catch((err) => {
         console.error('Failed to fetch run metadata:', err);
@@ -109,7 +113,7 @@ export function useRun(runId: string | null): UseRunResult {
     };
   }, [runId]);
 
-  return { events, status, pendingTool, isLoading, error, parentRunId };
+  return { events, status, pendingTool, isLoading, error, parentRunId, agentType };
 }
 
 export async function createRun(prompt: string, userId: string): Promise<string> {

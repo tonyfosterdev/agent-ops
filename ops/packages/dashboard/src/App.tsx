@@ -9,7 +9,7 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     return params.get('runId');
   });
-  const { events, status, pendingTool, isLoading, error, parentRunId } = useRun(runId);
+  const { events, status, pendingTool, isLoading, error, parentRunId, agentType } = useRun(runId);
   const timelineEndRef = useRef<HTMLDivElement>(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -88,9 +88,25 @@ function App() {
             {/* Run Info */}
             <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
               <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-sm text-gray-400">Run ID:</span>
-                  <span className="ml-2 font-mono text-sm text-gray-300">{runId}</span>
+                <div className="space-y-1">
+                  <div>
+                    <span className="text-sm text-gray-400">Run ID:</span>
+                    <span className="ml-2 font-mono text-sm text-gray-300">{runId}</span>
+                  </div>
+                  {agentType && (
+                    <div>
+                      <span className="text-sm text-gray-400">Agent:</span>
+                      <span className="ml-2 text-sm text-purple-300 font-medium">{agentType}</span>
+                    </div>
+                  )}
+                  {parentRunId && (
+                    <div>
+                      <span className="text-sm text-gray-400">Parent Run:</span>
+                      <span className="ml-2 font-mono text-sm text-gray-500" title={parentRunId}>
+                        {parentRunId.slice(0, 8)}...
+                      </span>
+                    </div>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-gray-400">Status:</span>
@@ -117,13 +133,6 @@ function App() {
                   pendingTool={status === 'suspended' ? pendingTool : null}
                   onApprove={handleApprove}
                   onReject={handleReject}
-                  parentRunId={parentRunId}
-                  onNavigateToParent={() => {
-                    if (parentRunId) {
-                      setRunId(parentRunId);
-                      window.history.pushState({}, '', `?runId=${parentRunId}`);
-                    }
-                  }}
                 />
               )}
               <div ref={timelineEndRef} />

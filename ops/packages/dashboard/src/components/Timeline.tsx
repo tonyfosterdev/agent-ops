@@ -7,8 +7,6 @@ interface TimelineProps {
   pendingTool: PendingTool | null;
   onApprove: () => Promise<void>;
   onReject: (feedback: string) => Promise<void>;
-  parentRunId?: string | null;
-  onNavigateToParent?: () => void;
 }
 
 // Cache type for child run events
@@ -26,13 +24,15 @@ const MAX_APPROVAL_POLL_ATTEMPTS = 60;
 
 const API_BASE = '';
 const MAX_INLINE_EVENTS = 100;
+const MAX_CHILD_DEPTH = 5;
 
-export function Timeline({ events, pendingTool, onApprove, onReject, parentRunId, onNavigateToParent }: TimelineProps) {
-  const [expandedChildRuns, setExpandedChildRuns] = useState<Set<string>>(new Set());
+export function Timeline({ events, pendingTool, onApprove, onReject }: TimelineProps) {
+  // Track collapsed child runs (default is expanded)
+  const [collapsedChildRuns, setCollapsedChildRuns] = useState<Set<string>>(new Set());
   const [childRunEventsCache, setChildRunEventsCache] = useState<ChildRunEventsCache>(new Map());
 
   const toggleChildRun = (childRunId: string) => {
-    setExpandedChildRuns((prev) => {
+    setCollapsedChildRuns((prev) => {
       const next = new Set(prev);
       if (next.has(childRunId)) {
         next.delete(childRunId);
@@ -62,30 +62,15 @@ export function Timeline({ events, pendingTool, onApprove, onReject, parentRunId
 
   return (
     <div className="space-y-4">
-      {parentRunId && onNavigateToParent && (
-        <button
-          onClick={onNavigateToParent}
-          className="flex items-center gap-2 text-purple-400 hover:text-purple-300 transition-colors text-sm mb-4"
-        >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-          </svg>
-          <span>Back to parent run</span>
-        </button>
-      )}
       {events.map((event) => (
         <TimelineEntry
           key={event.id}
           event={event}
-          expandedChildRuns={expandedChildRuns}
+          collapsedChildRuns={collapsedChildRuns}
           onToggleChildRun={toggleChildRun}
           childRunEventsCache={childRunEventsCache}
           onChildRunEventsFetched={onChildRunEventsFetched}
+          depth={0}
         />
       ))}
       {pendingTool && (
@@ -209,7 +194,6 @@ function ChildApprovalInline({ childRunId }: { childRunId: string }) {
   const [feedback, setFeedback] = useState('');
   const [childStatus, setChildStatus] = useState<string | null>(null);
   const [isResolved, setIsResolved] = useState(false);
-  const [maxPollsReached, setMaxPollsReached] = useState(false);
 
   useEffect(() => {
     // Stop polling after user has submitted approval/rejection
@@ -222,7 +206,6 @@ function ChildApprovalInline({ childRunId }: { childRunId: string }) {
     const fetchChildSnapshot = async () => {
       // Check poll limit BEFORE making the fetch call
       if (pollCount >= MAX_APPROVAL_POLL_ATTEMPTS) {
-        setMaxPollsReached(true);
         setError('Timed out waiting for child approval data');
         setIsLoading(false);
         return;
@@ -321,14 +304,6 @@ function ChildApprovalInline({ childRunId }: { childRunId: string }) {
     return (
       <div className="mt-3 bg-red-900/30 rounded-lg border border-red-700 p-4">
         <div className="text-red-400 text-sm">Failed to load child approval: {error}</div>
-        {maxPollsReached && (
-          <a
-            href={`?runId=${childRunId}`}
-            className="mt-2 inline-block text-purple-400 hover:text-purple-300 text-sm underline transition-colors"
-          >
-            View child run directly
-          </a>
-        )}
       </div>
     );
   }
@@ -441,6 +416,10 @@ interface InlineChildRunEventsProps {
   childRunId: string;
   cachedData?: { events: JournalEvent[]; totalEvents: number };
   onEventsFetched: (childRunId: string, events: JournalEvent[], totalEvents: number) => void;
+  depth: number;
+  collapsedChildRuns: Set<string>;
+  onToggleChildRun: (childRunId: string) => void;
+  childRunEventsCache: ChildRunEventsCache;
 }
 
 /**
@@ -449,8 +428,18 @@ interface InlineChildRunEventsProps {
  * Uses cache to avoid refetching on expand/collapse toggle.
  * Implements bounded retry for race condition when parent emits CHILD_RUN_STARTED
  * before child's RUN_STARTED event exists.
+ * Supports recursive child run display up to MAX_CHILD_DEPTH.
  */
-function InlineChildRunEvents({ childRunId, cachedData, onEventsFetched }: InlineChildRunEventsProps) {
+function InlineChildRunEvents({
+  childRunId,
+  cachedData,
+  onEventsFetched,
+  depth,
+  collapsedChildRuns,
+  onToggleChildRun,
+  childRunEventsCache
+}: InlineChildRunEventsProps) {
+  const [childAgentType, setChildAgentType] = useState<string | null>(null);
   const [events, setEvents] = useState<JournalEvent[]>(cachedData?.events || []);
   const [isLoading, setIsLoading] = useState(!cachedData);
   const [error, setError] = useState<string | null>(null);
@@ -505,6 +494,7 @@ function InlineChildRunEvents({ childRunId, cachedData, onEventsFetched }: Inlin
           // Success or max retries reached
           setTotalEvents(data.total_count || fetchedEvents.length);
           setEvents(fetchedEvents);
+          setChildAgentType(data.agent_type || null);
           setMaxRetriesReached(fetchedEvents.length === 0 && currentRetry >= MAX_CHILD_RUN_RETRIES);
           setIsLoading(false);
 
@@ -566,40 +556,71 @@ function InlineChildRunEvents({ childRunId, cachedData, onEventsFetched }: Inlin
       <div className="ml-8 mt-2 border-l-2 border-yellow-800 pl-4 py-2">
         <div className="text-yellow-400 text-sm">
           Child run has not produced events yet.
-          <a
-            href={`?runId=${childRunId}`}
-            className="ml-2 text-purple-400 hover:text-purple-300 underline transition-colors"
-          >
-            View child run directly
-          </a>
         </div>
       </div>
     );
   }
 
+  // Generate depth-based border colors for visual hierarchy
+  const borderColors = [
+    'border-purple-800',
+    'border-purple-700',
+    'border-purple-600',
+    'border-indigo-700',
+    'border-indigo-600',
+  ];
+  const borderColor = borderColors[Math.min(depth, borderColors.length - 1)];
+
   return (
-    <div className="ml-8 mt-2 border-l-2 border-purple-800 pl-4 space-y-3">
-      <div className="text-xs text-purple-400 font-medium">Child Run Events ({events.length}{totalEvents > MAX_INLINE_EVENTS ? ` of ${totalEvents}` : ''})</div>
+    <div className={`ml-8 mt-2 border-l-2 ${borderColor} pl-4 space-y-3`}>
+      <div className="text-xs text-purple-400 font-medium flex items-center gap-2">
+        <span>Child Run Events ({events.length}{totalEvents > MAX_INLINE_EVENTS ? ` of ${totalEvents}` : ''})</span>
+        {childAgentType && (
+          <span className="bg-purple-900/50 text-purple-300 px-1.5 py-0.5 rounded">{childAgentType}</span>
+        )}
+        <span className="text-gray-500 font-mono" title={childRunId}>{childRunId.slice(0, 8)}</span>
+      </div>
       {events.map((event) => (
-        <InlineChildEventEntry key={event.id} event={event} />
+        <InlineChildEventEntry
+          key={event.id}
+          event={event}
+          depth={depth}
+          collapsedChildRuns={collapsedChildRuns}
+          onToggleChildRun={onToggleChildRun}
+          childRunEventsCache={childRunEventsCache}
+          onChildRunEventsFetched={onEventsFetched}
+        />
       ))}
       {totalEvents > MAX_INLINE_EVENTS && (
-        <a
-          href={`?runId=${childRunId}`}
-          className="inline-block text-purple-400 hover:text-purple-300 text-sm transition-colors"
-        >
-          View all {totalEvents} events in full child run view
-        </a>
+        <div className="text-gray-500 text-sm">
+          Showing first {MAX_INLINE_EVENTS} of {totalEvents} events
+        </div>
       )}
     </div>
   );
 }
 
+interface InlineChildEventEntryProps {
+  event: JournalEvent;
+  depth: number;
+  collapsedChildRuns: Set<string>;
+  onToggleChildRun: (childRunId: string) => void;
+  childRunEventsCache: ChildRunEventsCache;
+  onChildRunEventsFetched: (childRunId: string, events: JournalEvent[], totalEvents: number) => void;
+}
+
 /**
- * Simplified event entry for inline child run display
- * No recursive child run expansion allowed - must navigate to view nested children
+ * Event entry for inline child run display
+ * Supports recursive child run expansion up to MAX_CHILD_DEPTH
  */
-function InlineChildEventEntry({ event }: { event: JournalEvent }) {
+function InlineChildEventEntry({
+  event,
+  depth,
+  collapsedChildRuns,
+  onToggleChildRun,
+  childRunEventsCache,
+  onChildRunEventsFetched
+}: InlineChildEventEntryProps) {
   const timestamp = new Date(event.created_at).toLocaleTimeString();
 
   switch (event.type) {
@@ -700,30 +721,67 @@ function InlineChildEventEntry({ event }: { event: JournalEvent }) {
     }
 
     case 'CHILD_RUN_STARTED': {
-      const payload = event.payload as { agent_type: string; child_run_id: string };
+      const payload = event.payload as { agent_type: string; child_run_id: string; task?: string };
+      const nextDepth = depth + 1;
+      const isCollapsed = collapsedChildRuns.has(payload.child_run_id);
+      const isMaxDepth = nextDepth >= MAX_CHILD_DEPTH;
+
       return (
         <div className="text-xs">
-          <span className="text-gray-500 font-mono">{timestamp}</span>
-          <span className="ml-2 bg-purple-900/50 text-purple-300 px-1.5 py-0.5 rounded">DELEGATING</span>
-          <span className="ml-2 text-purple-300">{payload.agent_type}</span>
-          <a
-            href={`?runId=${payload.child_run_id}`}
-            className="ml-2 text-purple-400 hover:text-purple-300 underline"
-          >
-            view
-          </a>
+          <div className="flex items-center gap-2">
+            <span className="text-gray-500 font-mono">{timestamp}</span>
+            <span className="bg-purple-900/50 text-purple-300 px-1.5 py-0.5 rounded">DELEGATING</span>
+            <span className="text-purple-300">{payload.agent_type}</span>
+            <span className="text-gray-500 font-mono" title={payload.child_run_id}>{payload.child_run_id.slice(0, 8)}</span>
+            {!isMaxDepth && (
+              <button
+                onClick={() => onToggleChildRun(payload.child_run_id)}
+                className="flex items-center gap-1 text-purple-400 hover:text-purple-300 transition-colors"
+              >
+                <svg
+                  className={`w-3 h-3 transition-transform ${!isCollapsed ? 'rotate-90' : ''}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+                <span>{isCollapsed ? 'Expand' : 'Collapse'}</span>
+              </button>
+            )}
+          </div>
+          {payload.task && (
+            <div className="mt-1 text-gray-400 pl-4">{payload.task.slice(0, 100)}</div>
+          )}
+          {isMaxDepth && (
+            <div className="mt-1 text-gray-500 text-xs pl-4">Max depth reached</div>
+          )}
+          {!isMaxDepth && !isCollapsed && (
+            <InlineChildRunEvents
+              childRunId={payload.child_run_id}
+              cachedData={childRunEventsCache.get(payload.child_run_id)}
+              onEventsFetched={onChildRunEventsFetched}
+              depth={nextDepth}
+              collapsedChildRuns={collapsedChildRuns}
+              onToggleChildRun={onToggleChildRun}
+              childRunEventsCache={childRunEventsCache}
+            />
+          )}
         </div>
       );
     }
 
     case 'CHILD_RUN_COMPLETED': {
-      const payload = event.payload as { success: boolean };
+      const payload = event.payload as { success: boolean; child_run_id?: string };
       return (
         <div className="text-xs">
           <span className="text-gray-500 font-mono">{timestamp}</span>
           <span className={`ml-2 px-1.5 py-0.5 rounded ${payload.success ? 'bg-green-900/50 text-green-300' : 'bg-red-900/50 text-red-300'}`}>
             DELEGATION {payload.success ? 'COMPLETE' : 'FAILED'}
           </span>
+          {payload.child_run_id && (
+            <span className="ml-2 text-gray-500 font-mono" title={payload.child_run_id}>{payload.child_run_id.slice(0, 8)}</span>
+          )}
         </div>
       );
     }
@@ -740,13 +798,21 @@ function InlineChildEventEntry({ event }: { event: JournalEvent }) {
 
 interface TimelineEntryProps {
   event: JournalEvent;
-  expandedChildRuns: Set<string>;
+  collapsedChildRuns: Set<string>;
   onToggleChildRun: (childRunId: string) => void;
   childRunEventsCache: ChildRunEventsCache;
   onChildRunEventsFetched: (childRunId: string, events: JournalEvent[], totalEvents: number) => void;
+  depth: number;
 }
 
-function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEventsCache, onChildRunEventsFetched }: TimelineEntryProps) {
+function TimelineEntry({
+  event,
+  collapsedChildRuns,
+  onToggleChildRun,
+  childRunEventsCache,
+  onChildRunEventsFetched,
+  depth
+}: TimelineEntryProps) {
   const timestamp = new Date(event.created_at).toLocaleTimeString();
 
   switch (event.type) {
@@ -824,18 +890,15 @@ function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEve
               <span className="bg-orange-900 text-orange-300 px-2 py-0.5 rounded text-xs">
                 SUSPENDED
               </span>
+              {payload.blocked_by_child_run_id && (
+                <span className="text-gray-500 font-mono" title={payload.blocked_by_child_run_id}>
+                  blocked by {payload.blocked_by_child_run_id.slice(0, 8)}
+                </span>
+              )}
             </div>
             <div className="mt-1 text-orange-300">{payload.reason}</div>
             {payload.blocked_by_child_run_id && (
-              <>
-                <ChildApprovalInline childRunId={payload.blocked_by_child_run_id} />
-                <a
-                  href={`?runId=${payload.blocked_by_child_run_id}`}
-                  className="text-purple-400 hover:text-purple-300 text-sm mt-3 inline-block transition-colors"
-                >
-                  View full child run
-                </a>
-              </>
+              <ChildApprovalInline childRunId={payload.blocked_by_child_run_id} />
             )}
           </div>
         </EntryWrapper>
@@ -942,7 +1005,7 @@ function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEve
 
     case 'CHILD_RUN_STARTED': {
       const payload = event.payload as { child_run_id: string; agent_type: string; task: string };
-      const isExpanded = expandedChildRuns.has(payload.child_run_id);
+      const isCollapsed = collapsedChildRuns.has(payload.child_run_id);
       return (
         <EntryWrapper event={event}>
           <div className="border-l-4 border-purple-500 pl-4 py-2">
@@ -951,10 +1014,8 @@ function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEve
               <span className="bg-purple-900 text-purple-300 px-2 py-0.5 rounded text-xs">
                 DELEGATING
               </span>
-            </div>
-            <div className="mt-1">
-              <span className="text-gray-400">Agent: </span>
               <span className="text-purple-300 font-medium">{payload.agent_type}</span>
+              <span className="text-gray-500 font-mono" title={payload.child_run_id}>{payload.child_run_id.slice(0, 8)}</span>
             </div>
             <div className="mt-1 text-gray-400 text-sm">{payload.task}</div>
             <div className="flex gap-3 mt-2">
@@ -963,27 +1024,25 @@ function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEve
                 className="flex items-center gap-1 text-purple-400 hover:text-purple-300 text-sm transition-colors"
               >
                 <svg
-                  className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                  className={`w-4 h-4 transition-transform ${!isCollapsed ? 'rotate-90' : ''}`}
                   fill="none"
                   stroke="currentColor"
                   viewBox="0 0 24 24"
                 >
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                 </svg>
-                <span>{isExpanded ? 'Collapse' : 'Expand'} child run</span>
+                <span>{isCollapsed ? 'Expand' : 'Collapse'} child run</span>
               </button>
-              <a
-                href={`?runId=${payload.child_run_id}`}
-                className="text-purple-400 hover:text-purple-300 text-sm underline transition-colors"
-              >
-                View full child run
-              </a>
             </div>
-            {isExpanded && (
+            {!isCollapsed && (
               <InlineChildRunEvents
                 childRunId={payload.child_run_id}
                 cachedData={childRunEventsCache.get(payload.child_run_id)}
                 onEventsFetched={onChildRunEventsFetched}
+                depth={depth + 1}
+                collapsedChildRuns={collapsedChildRuns}
+                onToggleChildRun={onToggleChildRun}
+                childRunEventsCache={childRunEventsCache}
               />
             )}
           </div>
@@ -993,7 +1052,7 @@ function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEve
 
     case 'CHILD_RUN_COMPLETED': {
       const payload = event.payload as { child_run_id: string; success: boolean; summary: string };
-      const isExpanded = expandedChildRuns.has(payload.child_run_id);
+      const isCollapsed = collapsedChildRuns.has(payload.child_run_id);
       return (
         <EntryWrapper event={event}>
           <div
@@ -1010,6 +1069,7 @@ function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEve
               >
                 DELEGATION {payload.success ? 'COMPLETE' : 'FAILED'}
               </span>
+              <span className="text-gray-500 font-mono" title={payload.child_run_id}>{payload.child_run_id.slice(0, 8)}</span>
             </div>
             <div className="mt-1 text-gray-300">{payload.summary}</div>
             <div className="flex gap-3 mt-2">
@@ -1022,31 +1082,25 @@ function TimelineEntry({ event, expandedChildRuns, onToggleChildRun, childRunEve
                 }`}
               >
                 <svg
-                  className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                  className={`w-4 h-4 transition-transform ${!isCollapsed ? 'rotate-90' : ''}`}
                   fill="none"
                   stroke="currentColor"
                   viewBox="0 0 24 24"
                 >
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                 </svg>
-                <span>{isExpanded ? 'Collapse' : 'Expand'} child run</span>
+                <span>{isCollapsed ? 'Expand' : 'Collapse'} child run</span>
               </button>
-              <a
-                href={`?runId=${payload.child_run_id}`}
-                className={`text-sm underline transition-colors ${
-                  payload.success
-                    ? 'text-green-400 hover:text-green-300'
-                    : 'text-red-400 hover:text-red-300'
-                }`}
-              >
-                View full child run
-              </a>
             </div>
-            {isExpanded && (
+            {!isCollapsed && (
               <InlineChildRunEvents
                 childRunId={payload.child_run_id}
                 cachedData={childRunEventsCache.get(payload.child_run_id)}
                 onEventsFetched={onChildRunEventsFetched}
+                depth={depth + 1}
+                collapsedChildRuns={collapsedChildRuns}
+                onToggleChildRun={onToggleChildRun}
+                childRunEventsCache={childRunEventsCache}
               />
             )}
           </div>
