@@ -136,45 +136,31 @@ The journal is the single source of truth. To reconstruct current state or resum
 
 ---
 
-## Achieving Durability: The Implementation
+## The DurableLoop
 
-### Storing Events in the Journal
-
-The journal is a SQLite database with an append-only `journal_entries` table:
-
-```typescript
-// Each event stored with:
-{
-  id: string;           // UUID
-  run_id: string;       // Which agent run
-  sequence: number;     // Order within run
-  event_type: string;   // RUN_STARTED, TOOL_PROPOSED, etc.
-  payload: object;      // Event-specific data
-  created_at: datetime; // When it happened
-}
-```
+The DurableLoop is the core execution engine. It runs the agent one step at a time, persisting state after each step.
 
 ### Single-Step Execution
 
-Here's where it gets interesting. The core execution engine—the DurableLoop—has one crucial constraint:
+I use the [Vercel AI SDK](https://sdk.vercel.ai/) to interact with Claude. The SDK has a `maxSteps` parameter that controls how many LLM interactions happen before returning:
 
 ```typescript
 const result = await generateText({
   model: anthropic('claude-sonnet-4-20250514'),
   maxSteps: 1,  // Execute exactly ONE step
-  system: getSystemPrompt(),
+  system: systemPrompt,
   messages,
   tools: preparedTools,
 });
 ```
 
-**`maxSteps: 1`**. This is the key to durability.
+Setting `maxSteps: 1` means we get control back after every LLM response. After each step, we persist the agent's thoughts and tool calls to the journal. If the server crashes, we replay the journal and continue from where we left off.
 
-After every single LLM interaction, we persist state to the journal. If the server crashes, we lose nothing—just replay the journal and pick up where we left off.
+### Tool Stripping
 
-### HITL via Tool Stripping
+The Vercel AI SDK automatically executes tool functions when the LLM proposes them. This is convenient, but it's a problem for HITL—I need to intercept dangerous tool calls before they execute.
 
-We can't let the LLM auto-execute dangerous tools. But we also need to control event ordering for ALL tools. The solution: strip the `execute` function from every tool.
+The solution: strip the `execute` function from every tool before passing them to the SDK.
 
 ```typescript
 const executeFunctions = new Map<string, Function>();
@@ -184,130 +170,94 @@ for (const [name, tool] of Object.entries(allTools)) {
   if (typeof tool.execute === 'function') {
     executeFunctions.set(name, tool.execute);
   }
-  // Strip execute from ALL tools
+  // Strip execute - SDK can't auto-run it now
   const { execute, ...rest } = tool;
   preparedTools[name] = rest;
 }
 ```
 
-Why ALL tools, not just dangerous ones? This ensures `TOOL_PROPOSED` is always recorded before any execution happens. The LLM sees the tool, proposes using it, but can't execute it. We control execution timing.
-
-After recording `TOOL_PROPOSED`:
-- **Safe tools**: Execute immediately from the Map, record `TOOL_RESULT`
-- **Dangerous tools**: Record `RUN_SUSPENDED`, wait for human
-
-On approval:
-1. Look up stored execute function from the Map
-2. Execute the tool
-3. Record `TOOL_RESULT`
-4. Continue the loop
-
-### Parent-Child Agent Coordination
-
-The orchestrator delegates to specialized sub-agents. When a child needs approval, both runs coordinate:
+Now the LLM can propose tools, but can't execute them. I execute manually after checking if the tool is dangerous:
 
 ```typescript
-// When child suspends, parent also suspends
-await journalService.appendEvent(parentRunId, {
-  type: 'RUN_SUSPENDED',
-  payload: {
-    reason: 'Waiting for child run approval',
-    blocked_by_child_run_id: childRunId,
-  },
+// Record TOOL_PROPOSED first
+await journalService.appendEvent(runId, {
+  type: 'TOOL_PROPOSED',
+  payload: { tool_name, args, call_id },
+});
+
+if (isDangerousTool(tool_name)) {
+  // Suspend and wait for human approval
+  await journalService.appendEvent(runId, {
+    type: 'RUN_SUSPENDED',
+    payload: { reason: `Dangerous tool: ${tool_name}` },
+  });
+  return { needsApproval: true };
+}
+
+// Safe tool - execute immediately
+const result = await executeFunctions.get(tool_name)(args);
+await journalService.appendEvent(runId, {
+  type: 'TOOL_RESULT',
+  payload: { call_id, output_data: result },
 });
 ```
 
-When the user approves on the parent's dashboard, we check if we're blocked by a child:
-
-```typescript
-// Check if suspended due to child needing HITL
-const lastSuspended = [...events].reverse().find(
-  e => e.event_type === 'RUN_SUSPENDED'
-);
-
-if (lastSuspended?.payload.blocked_by_child_run_id) {
-  // Forward resume to child run
-  await resumeRun(lastSuspended.payload.blocked_by_child_run_id, decision);
-  return;
-}
-```
-
-The flow:
-1. Child proposes dangerous tool → child suspends
-2. Parent also suspends (blocked by child)
-3. User approves on parent → approval forwards to child
-4. Child executes, completes → parent resumes
-
 ### Message Reconstruction
 
-After resume, we rebuild the LLM conversation from events. The `projectToPrompt()` function is essentially an event projection:
+When the agent resumes—either after approval or after a server restart—we need to rebuild the conversation for the LLM. The `projectToPrompt()` function replays journal events into the message format the SDK expects:
 
-```typescript
-function projectToPrompt(events, originalPrompt): CoreMessage[] {
-  const messages = [{ role: 'user', content: originalPrompt }];
+- `AGENT_THOUGHT` → assistant message
+- `TOOL_PROPOSED` → tool call in assistant message
+- `TOOL_RESULT` → tool result message
+- `RUN_RESUMED` (rejected) → user message with feedback
 
-  for (const event of events) {
-    switch (event.event_type) {
-      case 'AGENT_THOUGHT':
-        // Becomes assistant message with text
-        break;
-      case 'TOOL_PROPOSED':
-        // Becomes tool_call in assistant message
-        break;
-      case 'TOOL_RESULT':
-        // Becomes tool result message
-        break;
-      case 'RUN_RESUMED':
-        // Rejection feedback becomes user message
-        if (payload.decision === 'rejected') {
-          messages.push({
-            role: 'user',
-            content: `Rejected: ${payload.feedback}`
-          });
-        }
-        break;
-    }
-  }
-  return messages;
-}
-```
+This is the core of event sourcing: state is derived by replaying events.
 
-This is where event sourcing shines—the same mechanism handles:
-- Resuming after HITL approval
-- Recovering after server crash
+### Parent-Child Coordination
+
+The orchestrator agent delegates tasks to specialized sub-agents (coding agent, log analyzer). When a child agent proposes a dangerous tool, both runs need to coordinate:
+
+1. Child proposes dangerous tool → child run suspends
+2. Parent run also suspends, recording `blocked_by_child_run_id`
+3. User approves → approval forwards to the child
+4. Child executes and completes → parent resumes
+
+The user only sees one approval dialog. The parent-child coordination happens behind the scenes.
 
 ---
 
-## Real-Time Event Streaming
+## The Dashboard
 
-How does the Dashboard know when to show the approval UI? Server-Sent Events (SSE) with push-based architecture.
+The event journal can power real-time user interfaces. The dashboard in this project is an illustration of that—when the user submits a task, they see events stream in as the agent works.
+
+### Event Streaming
+
+The `JournalService` extends `EventEmitter`. When an event is appended, it's both persisted to PostgreSQL and emitted to any subscribers:
 
 ```typescript
-// JournalService is an EventEmitter
 class JournalService extends EventEmitter {
   async appendEvent(runId, event) {
-    // Persist to database
-    await this.db.insert(event);
-    // Emit for any subscribers
+    await this.entryRepository.save(event);
     this.emit(`run:${runId}`, event);
   }
 }
 ```
 
-The SSE endpoint subscribes to events as they're written:
+The dashboard connects via Server-Sent Events (SSE). Events stream immediately—no polling.
 
 ```typescript
-journalService.subscribe(runId, (event) => {
-  stream.writeSSE({ data: JSON.stringify(event), event: 'event' });
-
-  // Recursively subscribe to child runs
-  if (event.type === 'CHILD_RUN_STARTED') {
-    subscribeToRun(event.payload.child_run_id);
-  }
+journalService.on(`run:${runId}`, (event) => {
+  stream.writeSSE({ data: JSON.stringify(event) });
 });
 ```
 
-No polling. Events stream immediately when written to the journal. Parent and child run events flow through a single SSE connection.
+### The Approval UI
+
+When a `RUN_SUSPENDED` event arrives, the dashboard shows an approval dialog:
+
+![Approval Dialog](docs/assets/approval-dialog.png)
+
+The user sees the tool name and arguments, and can approve or reject. On rejection, they can provide feedback that gets injected as a user message—the agent sees "Tool execution was rejected: [feedback]" and can reconsider its approach.
 
 ---
 
@@ -323,9 +273,9 @@ This architecture doesn't guarantee complete durability in all cases. If a crash
 
 Tools must be written with care for idempotent replay:
 - `write_file` is safe to replay (same content, same result)
-- `send_email` is NOT safe (duplicate emails)
+- A hypothetical `send_email` tool would NOT be safe—replaying it would spam duplicate emails
 
-This is true of ALL event-sourced systems. The solution is idempotency keys at the tool level—not something I implemented here.
+This is true of all event-sourced systems. The solution is idempotency keys at the tool level—not something I implemented here.
 
 ### The Dual Write Problem
 
@@ -337,54 +287,19 @@ If you need true durability, use the [Outbox Pattern](https://medium.com/@mohant
 
 ---
 
-## Why This Is Complicated
+## Lessons Learned
 
-I won't pretend this architecture is simple. The DurableLoop handles:
+The architecture is conceptually simple: store events, derive state, replay to resume. But the implementation isn't trivial. The DurableLoop handles single-step execution, tool stripping, manual execution with proper event ordering, state machine transitions, parent-child coordination, message projection, resume forwarding, and error handling—all interacting with each other.
 
-- **Single-step execution** with journal persistence
-- **Tool stripping** to prevent auto-execution
-- **Manual tool execution** with proper event ordering
-- **State machine transitions** across 6 states
-- **Parent-child coordination** for nested agent runs
-- **Message projection** for LLM context reconstruction
-- **Resume forwarding** when parent is blocked by child
-- **Error handling** at every step
+Get the event ordering wrong, and the timeline is confusing. Get the resume forwarding wrong, and child approvals break. Get the projection wrong, and the LLM loses context.
 
-Each of these interacts with the others. Get the event ordering wrong, and the timeline is confusing. Get the resume forwarding wrong, and child approvals break. Get the projection wrong, and the LLM loses context.
-
----
-
-## Lessons Learned: Use a Framework
-
-Building this from scratch was educational. I now deeply understand:
-- How event sourcing applies to AI agents
-- Why state machines matter for agent lifecycle
-- The subtleties of human-in-the-loop coordination
-- How LLM tool calling actually works under the hood
-
-But if I were building this for production, **I would use an agent framework**.
-
-Frameworks like [LangGraph](https://langchain-ai.github.io/langgraph/), [CrewAI](https://www.crewai.com/), or [Temporal](https://temporal.io/) with AI extensions handle much of this complexity:
-- Durable execution with checkpointing
-- State machine definitions
-- Human-in-the-loop primitives
-- Tool management
-
-The patterns I implemented manually—event sourcing, state machines, tool stripping—are built into these frameworks. They've solved the edge cases I discovered the hard way.
-
-This project was a great learning experience. It showed me *why* these frameworks exist and *what problems* they solve. But for production AI agents, don't reinvent the wheel.
+It's time to move to proven, hardened frameworks that handle this complexity for me. [AgentKit](https://agentkit.inngest.com/overview), [LangGraph](https://langchain-ai.github.io/langgraph/), [CrewAI](https://www.crewai.com/), and [Temporal](https://temporal.io/) have already solved these edge cases.
 
 ---
 
 ## What's Next
 
-This architecture enables some interesting future work:
-
-- **Approval Policies**: Auto-approve `npm test` but require approval for `npm publish`
-- **Time Travel Debugging**: Replay events to any point in the run
-- **Collaborative Approval**: Multiple humans must approve high-risk operations
-
-The foundation is solid. Event sourcing gives us durability and auditability. The state machine gives us control. Human-in-the-loop gives us safety. Together, they let us build AI agents that are genuinely useful for operations work without being genuinely dangerous.
+I'm converting this project to [Inngest](https://www.inngest.com/) for durable execution and setting up [OpenTelemetry](https://opentelemetry.io/) for first-class observability. Then I'll explore making the agent more autonomous while keeping human-in-the-loop for the decisions that matter. Stay tuned.
 
 ---
 
