@@ -1,6 +1,6 @@
 # AgentOps
 
-![AgentOps Dashboard](./docs/assets/approval-dialog.png)
+![AgentOps Dashboard](./docs/assets/dashboard-demo.gif)
 
 **A proof-of-concept agent framework demonstrating durable AI agents with human-in-the-loop approval.**
 
