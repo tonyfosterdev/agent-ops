@@ -1,14 +1,15 @@
-# AgentOps - Autonomous Agent System
+# AgentOps - Durable Agent Framework
 
-A distributed client-server system for running autonomous AI agents that can debug code, analyze logs, and orchestrate complex tasks.
+A durable agent framework with human-in-the-loop approval. Agents can pause for human review, survive server restarts, and maintain full audit trails via event sourcing.
 
 ## Architecture
 
-This is a **monorepo** with three packages:
+This is a **monorepo** with four packages:
 
 - **shared**: Common types, base classes, configuration, and utilities
 - **agent-server**: Hono-based HTTP server that runs agents and streams events via SSE
-- **ops-cli**: Interactive CLI client that connects to the server
+- **dashboard**: React dashboard for submitting tasks and approving dangerous operations
+- **ops-cli**: Interactive CLI client (legacy, use dashboard for HITL)
 
 ## Quick Start
 
@@ -24,8 +25,8 @@ npm run build
 # Run server
 npm run dev:server
 
-# Run CLI (in another terminal)
-npm run dev:cli
+# Run dashboard (in another terminal)
+npm run dev:dashboard
 ```
 
 ### Via Docker
@@ -67,12 +68,12 @@ ops run "Fix TypeScript errors" --agent coding
 See README files in each package:
 - `packages/shared/` - Shared utilities and types
 - `packages/agent-server/` - HTTP server documentation
-- `packages/ops-cli/` - CLI usage guide
+- `packages/dashboard/` - React dashboard with approval UI
 
 ## Tech Stack
 
-- **Server**: Hono, TypeScript, SSE streaming
-- **CLI**: Ink, React, Commander
+- **Server**: Hono, TypeScript, TypeORM, PostgreSQL
+- **Dashboard**: React, Tailwind CSS, SSE streaming
 - **Infrastructure**: Docker, Traefik, Loki
 
 ## License

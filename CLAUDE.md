@@ -2,11 +2,15 @@
 
 ## Project Overview
 
-This repository demonstrates a **basic ops agent framework** with a distributed bookstore application as a test environment.
+This repository demonstrates a **durable ops agent framework** with human-in-the-loop approval, using a distributed bookstore application as a test environment.
 
-**Business Domain**: Online bookstore with multiple warehouse locations
+**Agent Framework Features**:
+- Human-in-the-Loop (HITL) - Dangerous operations pause for human approval
+- Event Sourcing - All agent state derived from append-only journal for crash recovery
+- Multi-agent Orchestration - Route tasks to specialized agents based on capabilities
+- Real-time Dashboard - Watch agent progress and approve actions via web UI
 
-**Key Features**:
+**Bookstore Test Application**:
 - Book catalog management
 - Customer orders with payment tracking
 - Distributed inventory across warehouses
@@ -77,6 +81,8 @@ docker compose exec warehouse-beta npm run seed
 
 ### Access Points
 
+- **Agent Dashboard**: http://localhost:3001 (submit tasks, approve actions)
+- **Agent Server API**: http://api.localhost/agents
 - **Bookstore UI**: http://localhost
 - **Store API**: http://api.localhost/store
 - **Warehouse Alpha**: http://api.localhost/warehouses/alpha
@@ -138,6 +144,21 @@ npm run build
 # Seed database
 npm run seed
 ```
+
+### Agent Framework (ops/)
+
+```bash
+cd ops
+npm install              # Install dependencies
+npm run build            # Build all packages
+npm run dev:server       # Run agent server (port 3200)
+npm run dev:dashboard    # Run dashboard (port 3001)
+```
+
+Key packages:
+- `ops/packages/agent-server/` - Hono HTTP server + agents
+- `ops/packages/dashboard/` - React dashboard with approval UI
+- `ops/packages/shared/` - Common types and utilities
 
 ### Docker Commands
 
