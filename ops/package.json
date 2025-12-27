@@ -12,6 +12,7 @@
     "build:server": "npm run build -w agent-server",
     "build:cli": "npm run build -w ops-cli",
     "dev:server": "npm run dev -w agent-server",
+    "dev:dashboard": "npm run dev -w dashboard",
     "dev:cli": "npm run dev -w ops-cli",
     "clean": "rm -rf packages/*/dist packages/*/node_modules node_modules"
   },

@@ -85,6 +85,27 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # Ops PostgreSQL Database (for Durable Runs)
+  ops-db:
+    image: postgres:16-alpine
+    container_name: ops-db
+    environment:
+      POSTGRES_USER: ${OPS_DB_USERNAME:-opsuser}
+      POSTGRES_PASSWORD: ${OPS_DB_PASSWORD:-opspassword}
+      POSTGRES_DB: ${OPS_DB_DATABASE:-ops_db}
+    volumes:
+      - ops-db-data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+    networks:
+      - agentops-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opsuser -d ops_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   # Store API Service
   store-api:
     build:
@@ -93,7 +114,8 @@ services:
     container_name: store-api
     environment:
       PORT: 3000
-      NODE_ENV: production
+      NODE_ENV: development
+      DISABLE_PRETTY_PRINT_LOGGING: "true"
       DB_HOST: store-db
       DB_PORT: 5432
       DB_USERNAME: ${STORE_DB_USERNAME:-storeuser}
@@ -138,7 +160,8 @@ services:
     container_name: warehouse-alpha
     environment:
       PORT: 3000
-      NODE_ENV: production
+      NODE_ENV: development
+      DISABLE_PRETTY_PRINT_LOGGING: "true"
       WAREHOUSE_NAME: warehouse-alpha
       WAREHOUSE_URL: http://api.localhost/warehouses/alpha
       WAREHOUSE_INTERNAL_URL: http://warehouse-alpha:3000
@@ -189,7 +212,8 @@ services:
     container_name: warehouse-beta
     environment:
       PORT: 3000
-      NODE_ENV: production
+      NODE_ENV: development
+      DISABLE_PRETTY_PRINT_LOGGING: "true"
       WAREHOUSE_NAME: warehouse-beta
       WAREHOUSE_URL: http://api.localhost/warehouses/beta
       WAREHOUSE_INTERNAL_URL: http://warehouse-beta:3000
@@ -312,16 +336,25 @@ services:
       AUTH_USERNAME: ${AGENT_SERVER_USERNAME:-admin}
       AUTH_PASSWORD: ${AGENT_SERVER_PASSWORD}
       WORK_DIR: /workspace
+      COMPOSE_PROJECT_NAME: agentops
       LOG_LEVEL: info
       LOKI_URL: http://loki:3100
+      # Ops Database
+      OPS_DB_HOST: ops-db
+      OPS_DB_PORT: 5432
+      OPS_DB_USERNAME: ${OPS_DB_USERNAME:-opsuser}
+      OPS_DB_PASSWORD: ${OPS_DB_PASSWORD:-opspassword}
+      OPS_DB_DATABASE: ${OPS_DB_DATABASE:-ops_db}
     ports:
       - "3200:3200"
     volumes:
       - .:/workspace:rw
+      - /var/run/docker.sock:/var/run/docker.sock:rw
     networks:
       - agentops-network
     depends_on:
       - loki
+      - ops-db
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.agent-server.rule=Host(`api.localhost`) && PathPrefix(`/agents`)"
@@ -333,5 +366,6 @@ volumes:
   store-db-data:
   warehouse-alpha-db-data:
   warehouse-beta-db-data:
+  ops-db-data:
   loki-data:
   grafana-data:

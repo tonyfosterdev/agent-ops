@@ -1,13 +1,15 @@
 {
   "name": "agent-server",
   "version": "1.0.0",
-  "description": "Hono-based HTTP server for autonomous agents",
+  "description": "Hono-based HTTP server for autonomous agents with durable run support",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test:log-agent": "tsx scripts/test-log-agent.ts",
+    "test:coding-agent": "tsx scripts/test-coding-agent.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^0.0.54",
@@ -17,8 +19,11 @@
     "glob": "^13.0.0",
     "hono": "^4.0.0",
     "ops-shared": "*",
+    "pg": "^8.11.3",
     "pino": "^8.17.2",
     "pino-pretty": "^10.0.0",
+    "reflect-metadata": "^0.2.2",
+    "typeorm": "^0.3.20",
     "zod": "^3.22.4"
   },
   "devDependencies": {

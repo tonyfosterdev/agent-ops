@@ -1,19 +1,19 @@
 # AgentOps
 
-<img src="./docs/assets/cli-demo.gif" alt="AgentOps CLI Demo" width="800" />
+![AgentOps Dashboard](./docs/assets/dashboard-demo.gif)
 
-**A proof-of-concept agent framework demonstrating autonomous AI systems that can debug code, analyze logs, and orchestrate operational tasks.**
+**A proof-of-concept agent framework demonstrating durable AI agents with human-in-the-loop approval.**
 
-This repository showcases architectural patterns and design principles for building multi-agent systems. It's intended as a reference implementation and learning resource, not a production deployment.
+This repository showcases architectural patterns for building autonomous agent systems that can pause for human approval and resume after server restarts. It's intended as a reference implementation and learning resource, not a production deployment.
 
 ## What This Demonstrates
 
-This project illustrates key patterns for autonomous agent systems:
+This project illustrates key patterns for durable agent systems:
 
-- **Multi-agent orchestration** - Route tasks to specialized agents based on capabilities
-- **Tool-based execution** - LLM agents with file system, shell, and query tools
-- **Event-driven architecture** - Real-time streaming updates via Server-Sent Events
-- **Client-server pattern** - HTTP API with interactive CLI interface
+- **Human-in-the-Loop (HITL)** - Dangerous operations pause for human approval before executing
+- **Event Sourcing** - All agent state derived from an append-only journal for crash recovery
+- **Multi-agent Orchestration** - Route tasks to specialized agents based on capabilities
+- **Real-time Dashboard** - Watch agent progress and approve actions via web UI
 
 See [AGENT_ARCHITECTURE.md](./AGENT_ARCHITECTURE.md) for detailed architecture and patterns.
 
@@ -22,14 +22,17 @@ See [AGENT_ARCHITECTURE.md](./AGENT_ARCHITECTURE.md) for detailed architecture a
 **Agent Framework**:
 - [Vercel AI SDK](https://sdk.vercel.ai/) - LLM orchestration with tool calling
 - [Hono](https://hono.dev/) - Lightweight HTTP server
+- [TypeORM](https://typeorm.io/) - Database ORM for journal persistence
 - [Zod](https://zod.dev/) - Schema validation
 
-**CLI Interface**:
-- [Ink](https://github.com/vadimdemedes/ink) - React for terminal UIs
-- [Commander](https://github.com/tj/commander.js) - CLI argument parsing
+**Dashboard**:
+- [React](https://react.dev/) - UI framework
+- [Tailwind CSS](https://tailwindcss.com/) - Styling
+- Server-Sent Events - Real-time event streaming
 
 **Infrastructure**:
 - Docker Compose - Service orchestration
+- PostgreSQL - Journal persistence
 - Loki + Grafana - Log aggregation and visualization
 - Traefik - Reverse proxy
 
@@ -66,7 +69,6 @@ cp .env.example .env
 cp ops/packages/agent-server/.env.example ops/packages/agent-server/.env
 
 # Edit .env files and set your Anthropic API key
-# The defaults work for everything except ANTHROPIC_API_KEY
 nano ops/packages/agent-server/.env  # Set ANTHROPIC_API_KEY=sk-ant-...
 nano .env                            # Review and adjust if needed
 ```
@@ -89,24 +91,19 @@ See comments in `.env` files for variable descriptions.
 docker compose up --build
 ```
 
-### Start Agent CLI
+### Access the Dashboard
 
-```bash
-cd ops
-npm install
-npm run build
-npm run dev:cli
-```
+Open http://localhost:3001 in your browser.
 
-Then select an agent and provide a task:
-- **Orchestration Agent** - Routes to specialized agents
-- **Coding Agent** - Debug and fix code
-- **Log Analyzer Agent** - Query and analyze logs
+1. Enter a task (e.g., "The store-api is returning 500 errors. Fix it.")
+2. Watch the agent investigate and propose solutions
+3. Approve or reject dangerous operations (file writes, shell commands)
 
 ## Access Points
 
 | Service | URL | Purpose |
 |---------|-----|---------|
+| Agent Dashboard | http://localhost:3001 | Agent UI with approval flow |
 | Bookstore UI | http://localhost | Customer/admin interface |
 | Store API | http://api.localhost/store | Orders and catalog |
 | Warehouse Alpha | http://api.localhost/warehouses/alpha | Fulfillment |
@@ -121,48 +118,20 @@ Then select an agent and provide a task:
 - Admin: `admin@bookstore.com:admin123`
 - Warehouse Staff: `staff@warehouse-alpha.com:staff123`
 
-## Usage Examples
+## Example Tasks
 
-### Via CLI (Interactive)
-
-```bash
-cd ops
-npm run dev:cli
-```
-
-Select agent → Enter task → Watch real-time execution
-
-### Via API (Programmatic)
-
-```bash
-# Run coding agent
-curl -X POST http://api.localhost/agents/coding/run \
-  -u admin:admin123 \
-  -H "Content-Type: application/json" \
-  -d '{"task": "Fix TypeScript errors in test-cases/app.ts", "config": {"maxSteps": 10}}'
-
-# Run log analyzer
-curl -X POST http://api.localhost/agents/log-analyzer/run \
-  -u admin:admin123 \
-  -H "Content-Type: application/json" \
-  -d '{"task": "Find errors in store-api from the last hour"}'
-```
-
-### Example Tasks
+**Orchestration Agent** (recommended):
+- "The store-api is returning 500 errors. Fix it."
+- "Debug the inventory sync job and check recent logs"
+- "Fix the bug in auth service and verify no errors in logs"
 
 **Coding Agent**:
 - "Fix all TypeScript errors in ops/test-cases/"
 - "Debug why the authentication module is failing"
-- "Run the test suite and fix any failures"
 
 **Log Analyzer Agent**:
 - "Why is warehouse-alpha returning 500 errors?"
 - "Show me all failed order processing attempts"
-- "Analyze the last 10 minutes of store-api logs"
-
-**Orchestration Agent**:
-- "Fix the bug in auth service and verify no errors in logs"
-- "Debug the inventory sync job and check recent logs"
 
 ## Project Structure
 
@@ -171,7 +140,7 @@ agentops/
 ├── ops/                           # Agent framework (monorepo)
 │   ├── packages/
 │   │   ├── agent-server/          # Hono HTTP server + agents
-│   │   ├── ops-cli/               # Interactive CLI client
+│   │   ├── dashboard/             # React dashboard with approval UI
 │   │   └── shared/                # Common types and utilities
 │   └── test-cases/                # Sample code for testing agents
 ├── services/                      # Bookstore microservices
@@ -201,9 +170,9 @@ agentops/
 ```bash
 cd ops
 npm install              # Install dependencies
-npm run build           # Build all packages
-npm run dev:server      # Run agent server (port 3200)
-npm run dev:cli         # Run CLI client (in another terminal)
+npm run build            # Build all packages
+npm run dev:server       # Run agent server (port 3200)
+npm run dev:dashboard    # Run dashboard (port 3001)
 ```
 
 ### Bookstore Development

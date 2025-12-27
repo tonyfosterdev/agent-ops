@@ -1,5 +1,8 @@
 FROM node:20-alpine
 
+# Install Docker CLI for restart_service tool (Docker socket is mounted from host)
+RUN apk add --no-cache docker-cli docker-cli-compose docker-cli-buildx git
+
 WORKDIR /app
 
 # Copy root package.json and install workspace dependencies

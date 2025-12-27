@@ -9,8 +9,6 @@ export class BookService {
   async listBooks(): Promise<Array<Book & { total_inventory: number }>> {
     const books = await this.bookRepo.find({ where: { is_active: true } });
 
-    throw new Error("This is a test");
-
     // Attach aggregated inventory
     const booksWithInventory = await Promise.all(
       books.map(async (book) => {

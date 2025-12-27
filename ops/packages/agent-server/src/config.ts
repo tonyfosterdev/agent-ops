@@ -17,7 +17,17 @@ export const config = {
   },
 
   workDir: process.env.WORK_DIR || '/workspace',
+  composeProjectName: process.env.COMPOSE_PROJECT_NAME || 'agentops',
   lokiUrl: process.env.LOKI_URL || 'http://loki.localhost',
+
+  // Ops Database (for Durable Runs)
+  db: {
+    host: process.env.OPS_DB_HOST || 'localhost',
+    port: parseInt(process.env.OPS_DB_PORT || '5435', 10),
+    username: process.env.OPS_DB_USERNAME || 'opsuser',
+    password: process.env.OPS_DB_PASSWORD || 'opspassword',
+    database: process.env.OPS_DB_DATABASE || 'ops_db',
+  },
 };
 
 export const logger = pino({

@@ -647,7 +647,7 @@ If inventory numbers seem off:
 
 ### For Feature Questions
 - Refer to this guide
-- Check the [ARCHITECTURE.md](./ARCHITECTURE.md) for technical details
+- Check the [BOOKSTORE_ARCHITECTURE.md](../BOOKSTORE_ARCHITECTURE.md) for technical details
 - Review [CLAUDE.md](../CLAUDE.md) for developer context
 
 ### For Business Questions
