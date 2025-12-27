@@ -72,7 +72,7 @@ This repository demonstrates a **durable ops agent framework** for building auto
 - **Traefik** - Reverse proxy and routing
 - **Loki** - Log aggregation
 - **Grafana** - Log visualization
-- **SQLite** - Journal persistence
+- **PostgreSQL** - Journal persistence
 
 ---
 
@@ -186,25 +186,27 @@ const SAFE_TOOLS = new Set([
 
 ### The Tool Stripping Pattern
 
-For dangerous tools, the `execute` function is stripped before passing to the LLM:
+The `execute` function is stripped from ALL tools before passing to the LLM. This prevents the Vercel AI SDK from auto-executing tools and gives us control over event ordering:
 
 ```typescript
+const executeFunctions = new Map<string, Function>();
+
 for (const [name, tool] of Object.entries(allTools)) {
-  if (isDangerousTool(name)) {
-    // Strip execute - AI can propose, but can't auto-execute
-    const { execute, ...rest } = tool;
-    preparedTools[name] = rest;
-  } else {
-    // Safe tools keep execute
-    preparedTools[name] = tool;
+  // Save execute function for manual execution later
+  if (typeof tool.execute === 'function') {
+    executeFunctions.set(name, tool.execute);
   }
+  // Strip execute from ALL tools
+  const { execute, ...rest } = tool;
+  preparedTools[name] = rest;
 }
 ```
 
-This allows the LLM to:
-1. **See** the dangerous tool (knows it's available)
-2. **Propose** using it (generates tool call)
-3. **NOT execute** it automatically (no `execute` function)
+This allows us to:
+1. Record `TOOL_PROPOSED` before any execution happens
+2. Check if the tool is dangerous and suspend if needed
+3. Execute safe tools manually from the stored function map
+4. Execute dangerous tools only after human approval
 
 ### Approval Flow
 
@@ -495,7 +497,7 @@ Environment Variables:
 - `WORK_DIR` - Agent working directory
 - `LOKI_URL` - Loki server URL for log queries
 - `AUTH_USERNAME` / `AUTH_PASSWORD` - API authentication
-- `DATABASE_URL` - SQLite journal database path
+- `DATABASE_URL` - PostgreSQL connection string
 
 ---
 

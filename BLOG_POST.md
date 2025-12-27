@@ -1,24 +1,22 @@
 # Building Durable AI Agents: Event Sourcing, State Machines, and Humans in the Middle
 
-*What if AI agents could pause mid-task, wait for human approval, and resume exactly where they left off—even after a server crash?*
-
----
+*What if AI agents could pause mid-task, wait for human approval, and resume exactly where they left off, even after a server crash?*
 
 Building on my [previous ops agent project](https://tonyfoster.dev/building-an-ai-ops-agent), I wanted to solve two fundamental problems.
 
 **Problem A: Unsupervised Agents Are Dangerous**
 
-My ops agent framework gives agents real power—they can execute shell commands and modify files. This is useful; an agent can genuinely debug and fix issues. But some of these calls are dangerous. An agent might run `rm -rf` on the wrong directory, or make a "fix" that breaks things worse.
+My ops agent framework gives agents real power. They can execute shell commands and modify files. This is useful; an agent can genuinely debug and fix issues. But some of these calls are dangerous. An agent might run `rm -rf` on the wrong directory, or make a "fix" that breaks things worse.
 
 The agent is acting unsupervised. It has no concept of "wait, let me think about this more carefully."
 
-The obvious solution is confirmation dialogs—ask the human before doing anything dangerous. But traditional confirmation dialogs have a problem: if you wait hours for approval, or the server restarts, you lose all context. The agent forgets what it was doing.
+The obvious solution is confirmation dialogs: ask the human before doing anything dangerous. But traditional confirmation dialogs have a problem. If you wait hours for approval, or the server restarts, you lose all context. The agent forgets what it was doing.
 
-I needed agents that could *propose* dangerous actions, *pause* for human review, and *resume* seamlessly after approval—without losing state.
+I needed agents that could propose dangerous actions, pause for human review, and resume after approval without losing state.
 
 **Problem B: Agent Execution State Is Ephemeral**
 
-In my previous agent, execution state lived in memory. The agent would query logs, read files, and propose a fix—but if the server restarted while waiting for approval, that pending tool call was gone. It was just a variable in the running process.
+In my previous agent, execution state lived in memory. The agent would query logs, read files, and propose a fix. But if the server restarted while waiting for approval, that pending tool call was gone. It was just a variable in the running process.
 
 For operational tasks, I needed that execution state persisted.
 
@@ -28,11 +26,9 @@ When agents execute tools autonomously, you need to know what happened. My previ
 
 The answer required combining three patterns: **event sourcing** for durability and auditability, a **state machine** for control flow, and **human-in-the-loop** for safety.
 
----
-
 ## An Example
 
-Before diving into implementation, here's what human-in-the-loop looks like in practice:
+Before diving into implementation, here's what human-in-the-loop looks like in practice.
 
 **1. User submits**: "The store-api is returning 500 errors. Fix it."
 
@@ -56,18 +52,14 @@ The agents handled investigation, analysis, and solution design. The human just 
 
 This is the core idea: instead of fully automated execution, the agent pauses before dangerous operations and waits for human judgment. The agent does the tedious work; humans make the high-stakes decisions.
 
----
-
 ## Durability
 
-My previous agent kept everything in memory—it couldn't safely suspend or recover from service interruptions:
+My previous agent kept everything in memory. It couldn't safely suspend or recover from service interruptions:
 
 - Voluntary interruptions (waiting for approval) or involuntary ones (server restarts) cause the agent to lose its place
 - Complex work across multiple agents can't be coordinated
 
 I needed execution state persisted so the agent could pause, wait, and resume.
-
----
 
 ## Event Sourcing
 
@@ -113,7 +105,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-Six states, clear transitions. The `suspended` state is where human oversight lives—the agent waits here until the user approves or rejects the proposed action.
+Six states, clear transitions. The `suspended` state is where human oversight lives. The agent waits here until the user approves or rejects the proposed action.
 
 Events drive state transitions. When we record `RUN_SUSPENDED`, the run moves to `suspended`. When we record `RUN_RESUMED`, it moves back to `running`. The state machine defines valid transitions, but events are the source of truth.
 
@@ -133,8 +125,6 @@ Events are stored in an append-only journal. Here's what a typical run looks lik
 | 7 | `RUN_COMPLETED` | `{ summary: "Fixed the bug" }` |
 
 The journal is the single source of truth. To reconstruct current state or resume after a crash, replay the events.
-
----
 
 ## The DurableLoop
 
@@ -158,7 +148,7 @@ Setting `maxSteps: 1` means we get control back after every LLM response. After 
 
 ### Tool Stripping
 
-The Vercel AI SDK automatically executes tool functions when the LLM proposes them. This is convenient, but it's a problem for HITL—I need to intercept dangerous tool calls before they execute.
+The Vercel AI SDK automatically executes tool functions when the LLM proposes them. This is convenient, but it's a problem for HITL. I need to intercept dangerous tool calls before they execute.
 
 The solution: strip the `execute` function from every tool before passing them to the SDK.
 
@@ -204,7 +194,7 @@ await journalService.appendEvent(runId, {
 
 ### Message Reconstruction
 
-When the agent resumes—either after approval or after a server restart—we need to rebuild the conversation for the LLM. The `projectToPrompt()` function replays journal events into the message format the SDK expects:
+When the agent resumes, either after approval or after a server restart, we need to rebuild the conversation for the LLM. The `projectToPrompt()` function replays journal events into the message format the SDK expects:
 
 - `AGENT_THOUGHT` → assistant message
 - `TOOL_PROPOSED` → tool call in assistant message
@@ -224,32 +214,31 @@ The orchestrator agent delegates tasks to specialized sub-agents (coding agent, 
 
 The user only sees one approval dialog. The parent-child coordination happens behind the scenes.
 
----
-
 ## The Dashboard
 
-The event journal can power real-time user interfaces. The dashboard in this project is an illustration of that—when the user submits a task, they see events stream in as the agent works.
+The event journal can power real-time user interfaces. The dashboard in this project is an illustration of that. When the user submits a task, they see events stream in as the agent works.
 
 ### Event Streaming
 
-The `JournalService` extends `EventEmitter`. When an event is appended, it's both persisted to PostgreSQL and emitted to any subscribers:
+The `JournalService` uses an internal `EventEmitter`. When an event is appended, it's both persisted to PostgreSQL and emitted to subscribers:
 
 ```typescript
-class JournalService extends EventEmitter {
+class JournalService {
+  private emitter = new EventEmitter();
+
   async appendEvent(runId, event) {
     await this.entryRepository.save(event);
-    this.emit(`run:${runId}`, event);
+    this.emitter.emit(`run:${runId}`, event);
+  }
+
+  subscribe(runId, callback) {
+    this.emitter.on(`run:${runId}`, callback);
+    return () => this.emitter.off(`run:${runId}`, callback);
   }
 }
 ```
 
-The dashboard connects via Server-Sent Events (SSE). Events stream immediately—no polling.
-
-```typescript
-journalService.on(`run:${runId}`, (event) => {
-  stream.writeSSE({ data: JSON.stringify(event) });
-});
-```
+The dashboard connects via Server-Sent Events (SSE). Events stream immediately, no polling.
 
 ### The Approval UI
 
@@ -257,9 +246,7 @@ When a `RUN_SUSPENDED` event arrives, the dashboard shows an approval dialog:
 
 ![Approval Dialog](docs/assets/approval-dialog.png)
 
-The user sees the tool name and arguments, and can approve or reject. On rejection, they can provide feedback that gets injected as a user message—the agent sees "Tool execution was rejected: [feedback]" and can reconsider its approach.
-
----
+The user sees the tool name and arguments, and can approve or reject. On rejection, they can provide feedback that gets injected as a user message. The agent sees "Tool execution was rejected: [feedback]" and can reconsider its approach.
 
 ## Limitations & Caveats
 
@@ -273,35 +260,29 @@ This architecture doesn't guarantee complete durability in all cases. If a crash
 
 Tools must be written with care for idempotent replay:
 - `write_file` is safe to replay (same content, same result)
-- A hypothetical `send_email` tool would NOT be safe—replaying it would spam duplicate emails
+- A hypothetical `send_email` tool would NOT be safe. Replaying it would spam duplicate emails.
 
-This is true of all event-sourced systems. The solution is idempotency keys at the tool level—not something I implemented here.
+This is true of all event-sourced systems. The solution is idempotency keys at the tool level, which I didn't implement here.
 
 ### The Dual Write Problem
 
 Journal events aren't 100% accurate under disruption. If the server crashes after tool execution but before the event is recorded, the journal is incomplete.
 
-For this application—dashboard visualization and HITL—that's fine. But this architecture is NOT suitable for replicating events to a permanent store where accuracy is critical.
+For this application (dashboard visualization and HITL) that's fine. But this architecture is NOT suitable for replicating events to a permanent store where accuracy is critical.
 
 If you need true durability, use the [Outbox Pattern](https://medium.com/@mohantyshyama/designing-fault-tolerant-systems-solving-dual-writes-with-cdc-and-outbox-dd9a4ee727bb) or Change Data Capture (CDC).
 
----
-
 ## Lessons Learned
 
-The architecture is conceptually simple: store events, derive state, replay to resume. But the implementation isn't trivial. The DurableLoop handles single-step execution, tool stripping, manual execution with proper event ordering, state machine transitions, parent-child coordination, message projection, resume forwarding, and error handling—all interacting with each other.
+The architecture is conceptually simple: store events, derive state, replay to resume. But the implementation isn't trivial. The DurableLoop handles single-step execution, tool stripping, manual execution with proper event ordering, state machine transitions, parent-child coordination, message projection, resume forwarding, and error handling. All of these interact with each other.
 
 Get the event ordering wrong, and the timeline is confusing. Get the resume forwarding wrong, and child approvals break. Get the projection wrong, and the LLM loses context.
 
 It's time to move to proven, hardened frameworks that handle this complexity for me. [AgentKit](https://agentkit.inngest.com/overview), [LangGraph](https://langchain-ai.github.io/langgraph/), [CrewAI](https://www.crewai.com/), and [Temporal](https://temporal.io/) have already solved these edge cases.
 
----
-
 ## What's Next
 
 I'm converting this project to [Inngest](https://www.inngest.com/) for durable execution and setting up [OpenTelemetry](https://opentelemetry.io/) for first-class observability. Then I'll explore making the agent more autonomous while keeping human-in-the-loop for the decisions that matter. Stay tuned.
-
----
 
 The full source code is available at [github.com/tonyfosterdev/agentops](https://github.com/tonyfosterdev/agentops). The key files are:
 
@@ -309,5 +290,3 @@ The full source code is available at [github.com/tonyfosterdev/agentops](https:/
 - `ops/packages/agent-server/src/services/JournalService.ts` - Event sourcing
 - `ops/packages/agent-server/src/types/journal.ts` - Event type definitions
 - `ops/packages/dashboard/src/components/Timeline.tsx` - Approval UI
-
-Questions? Find me on Twitter [@tonyfosterdev](https://twitter.com/tonyfosterdev).
