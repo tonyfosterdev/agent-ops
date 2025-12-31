@@ -1,0 +1,138 @@
+# Docker Compose configuration for testing
+# Provides an isolated test environment with mock LLM, Inngest dev server, and test database
+#
+# Usage:
+#   docker compose -f docker-compose.test.yaml up -d
+#   npm run test:e2e (from ops/packages/agent-server)
+#   docker compose -f docker-compose.test.yaml down
+
+networks:
+  test-network:
+    driver: bridge
+
+services:
+  # Mock LLM Server - deterministic responses for reproducible tests
+  mock-llm:
+    build:
+      context: ./ops/packages/mock-llm
+      dockerfile: Dockerfile
+    container_name: mock-llm-test
+    ports:
+      - "3333:3333"
+    environment:
+      PORT: "3333"
+      FIXTURE_DIR: /app/fixtures
+      DEFAULT_FIXTURE: default.json
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3333/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Inngest Dev Server for testing
+  inngest-test:
+    image: inngest/inngest:latest
+    container_name: inngest-test
+    command: 'inngest dev -u http://agent-server-test:3200/api/inngest --no-discovery --no-poll'
+    ports:
+      - "8288:8288"
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8288/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Test Database (ephemeral - uses tmpfs for speed)
+  agent-db-test:
+    image: postgres:16-alpine
+    container_name: agent-db-test
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: agent_test_db
+    ports:
+      - "5436:5432"
+    networks:
+      - test-network
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d agent_test_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Agent Server in test mode
+  agent-server-test:
+    build:
+      context: ./ops
+      dockerfile: packages/agent-server/Dockerfile
+    container_name: agent-server-test
+    environment:
+      PORT: "3200"
+      NODE_ENV: test
+      LOG_LEVEL: debug
+      # Inngest configuration
+      USE_INNGEST: "true"
+      INNGEST_DEV: "1"
+      INNGEST_BASE_URL: http://inngest-test:8288
+      INNGEST_EVENT_KEY: test-key
+      # Database
+      OPS_DB_HOST: agent-db-test
+      OPS_DB_PORT: "5432"
+      OPS_DB_USERNAME: testuser
+      OPS_DB_PASSWORD: testpass
+      OPS_DB_DATABASE: agent_test_db
+      # Mock LLM configuration
+      ANTHROPIC_API_BASE: http://mock-llm:3333
+      ANTHROPIC_API_KEY: test-key-not-used
+      # Workspace
+      WORK_DIR: /workspace
+    ports:
+      - "3210:3200"
+    volumes:
+      - ./:/workspace:ro
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+      inngest-test:
+        condition: service_healthy
+      agent-db-test:
+        condition: service_healthy
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3200/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Dashboard for Playwright tests
+  dashboard-test:
+    build:
+      context: ./ops/packages/dashboard
+      dockerfile: Dockerfile
+    container_name: dashboard-test
+    environment:
+      VITE_API_URL: http://localhost:3210
+    ports:
+      - "3001:3001"
+    depends_on:
+      agent-server-test:
+        condition: service_healthy
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

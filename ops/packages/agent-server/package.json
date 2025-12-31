@@ -8,6 +8,11 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "clean": "rm -rf dist",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:e2e": "jest --config jest.e2e.config.js",
+    "test:e2e:setup": "docker compose -f ../../../docker-compose.test.yaml up -d --wait",
+    "test:e2e:teardown": "docker compose -f ../../../docker-compose.test.yaml down",
     "test:log-agent": "tsx scripts/test-log-agent.ts",
     "test:coding-agent": "tsx scripts/test-coding-agent.ts"
   },
@@ -18,6 +23,7 @@
     "dotenv": "^16.4.0",
     "glob": "^13.0.0",
     "hono": "^4.0.0",
+    "inngest": "^3.27.0",
     "ops-shared": "*",
     "pg": "^8.11.3",
     "pino": "^8.17.2",
@@ -27,7 +33,10 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.12",
     "@types/node": "^20.19.25",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
   }

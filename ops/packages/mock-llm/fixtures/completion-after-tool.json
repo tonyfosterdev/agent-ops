@@ -1,0 +1,13 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "The command executed successfully. I have completed the task. Here's a summary of what I found:\n\n1. The directory contains several important files\n2. The operation completed without errors\n3. All requested actions have been performed\n\nLet me know if you need anything else!"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 200,
+    "output_tokens": 85
+  }
+}

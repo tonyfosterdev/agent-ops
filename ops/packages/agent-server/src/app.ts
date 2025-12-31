@@ -5,6 +5,7 @@ import { basicAuth } from './middleware/auth';
 import { errorHandler } from './middleware/errorHandler';
 import healthRoutes from './routes/health';
 import runsRoutes from './routes/runs';
+import { inngestHandler } from './inngest/serve';
 
 export function createApp() {
   const app = new Hono();
@@ -25,6 +26,10 @@ export function createApp() {
 
   // Durable Runs routes (public - no auth for dashboard ease of use)
   app.route('/runs', runsRoutes);
+
+  // Inngest handler - receives events from Inngest Dev Server/Cloud
+  // This endpoint must be accessible by the Inngest infrastructure
+  app.route('/api/inngest', inngestHandler);
 
   return app;
 }

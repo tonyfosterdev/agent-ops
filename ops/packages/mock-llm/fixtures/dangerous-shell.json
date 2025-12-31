@@ -1,0 +1,21 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "I need to execute a shell command to list the files."
+    },
+    {
+      "type": "tool_use",
+      "id": "call-dangerous-1",
+      "name": "shell_command_execute",
+      "input": {
+        "command": "ls -la"
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "usage": {
+    "input_tokens": 150,
+    "output_tokens": 75
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "error": true,
+  "error_type": "rate_limit_error",
+  "message": "Rate limit exceeded. Please retry after 60 seconds.",
+  "content": [],
+  "stop_reason": null,
+  "usage": null
+}

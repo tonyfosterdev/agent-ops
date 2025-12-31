@@ -68,7 +68,7 @@ export interface RunResumedPayload {
 export interface ToolResultPayload {
   call_id: string;
   output_data: unknown;
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'skipped';
 }
 
 export interface RunCompletedPayload {

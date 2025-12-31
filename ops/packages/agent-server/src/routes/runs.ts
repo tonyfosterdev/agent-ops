@@ -2,13 +2,31 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { journalService, EnrichedJournalEvent } from '../services/JournalService';
 import { startRun, resumeRun, runAgentStep } from '../services/DurableLoop';
+import { inngest } from '../inngest/client';
 import { logger } from '../config';
 import type { RunStatus, AgentType } from '../types/journal';
 
 const runsRouter = new Hono();
 
 /**
+ * Feature flag for Inngest execution mode.
+ *
+ * When true, runs are executed via Inngest functions (durable, resumable).
+ * When false, runs use the legacy DurableLoop (in-process execution).
+ *
+ * Set via USE_INNGEST=true environment variable.
+ * Default is false during migration to allow gradual rollout.
+ */
+const USE_INNGEST = process.env.USE_INNGEST === 'true';
+
+/**
  * POST /runs - Create a new run
+ *
+ * Creates a run record and triggers execution via either:
+ * - Inngest: Durable execution with HITL via step.waitForEvent()
+ * - DurableLoop: Legacy in-process execution (fallback)
+ *
+ * The execution mode is controlled by the USE_INNGEST feature flag.
  */
 runsRouter.post('/', async (c) => {
   const body = await c.req.json();
@@ -25,8 +43,29 @@ runsRouter.post('/', async (c) => {
   }
 
   try {
-    const runId = await startRun(prompt, user_id, agent_type as AgentType);
-    return c.json({ id: runId, status: 'pending' }, 201);
+    if (USE_INNGEST) {
+      // Inngest path: Create run record, then trigger via event
+      const runId = await journalService.createRun(prompt, user_id, agent_type as AgentType);
+
+      // Send event to trigger the Inngest function
+      await inngest.send({
+        name: 'agent/run.started',
+        data: {
+          runId,
+          prompt,
+          userId: user_id,
+          agentType: agent_type as AgentType,
+        },
+      });
+
+      logger.info({ runId, agentType: agent_type, mode: 'inngest' }, 'Run created via Inngest');
+      return c.json({ id: runId, status: 'pending' }, 201);
+    } else {
+      // Legacy path: Use DurableLoop (in-process execution)
+      const runId = await startRun(prompt, user_id, agent_type as AgentType);
+      logger.info({ runId, agentType: agent_type, mode: 'legacy' }, 'Run created via DurableLoop');
+      return c.json({ id: runId, status: 'pending' }, 201);
+    }
   } catch (error: any) {
     logger.error({ error: error.message }, 'Failed to create run');
     return c.json({ error: error.message }, 500);
@@ -355,6 +394,12 @@ runsRouter.get('/:id/events', async (c) => {
 
 /**
  * POST /runs/:id/resume - Resume a suspended run
+ *
+ * Resumes a run that is waiting for HITL approval via either:
+ * - Inngest: Sends agent/run.resumed event to trigger step.waitForEvent()
+ * - DurableLoop: Directly calls resumeRun() for in-process execution
+ *
+ * The execution mode is controlled by the USE_INNGEST feature flag.
  */
 runsRouter.post('/:id/resume', async (c) => {
   const runId = c.req.param('id');
@@ -366,8 +411,35 @@ runsRouter.post('/:id/resume', async (c) => {
   }
 
   try {
-    await resumeRun(runId, decision, feedback);
-    return c.json({ success: true });
+    // Verify run exists and is suspended
+    const run = await journalService.getRun(runId);
+    if (!run) {
+      return c.json({ error: 'Run not found' }, 404);
+    }
+
+    if (run.status !== 'suspended') {
+      return c.json({ error: `Cannot resume run with status: ${run.status}` }, 400);
+    }
+
+    if (USE_INNGEST) {
+      // Inngest path: Send event to resume waiting function
+      await inngest.send({
+        name: 'agent/run.resumed',
+        data: {
+          runId,
+          decision: decision as 'approved' | 'rejected',
+          feedback,
+        },
+      });
+
+      logger.info({ runId, decision, mode: 'inngest' }, 'Resume event sent via Inngest');
+      return c.json({ success: true });
+    } else {
+      // Legacy path: Direct function call
+      await resumeRun(runId, decision, feedback);
+      logger.info({ runId, decision, mode: 'legacy' }, 'Run resumed via DurableLoop');
+      return c.json({ success: true });
+    }
   } catch (error: any) {
     logger.error({ error: error.message, runId }, 'Failed to resume run');
     return c.json({ error: error.message }, 400);
@@ -406,9 +478,14 @@ runsRouter.post('/:id/retry', async (c) => {
 /**
  * POST /runs/:id/cancel - Cancel a running or suspended run
  *
- * NOTE: This only updates the database state. It does NOT interrupt any
- * currently executing agent processes. The agent loop will see the status
- * change on its next iteration and stop gracefully.
+ * Cancels a run via either:
+ * - Inngest: Sends agent/run.cancelled event which triggers cancelOn
+ * - DurableLoop: Updates database state (loop checks on next iteration)
+ *
+ * The execution mode is controlled by the USE_INNGEST feature flag.
+ *
+ * NOTE: For legacy mode, this only updates the database state. It does NOT
+ * interrupt any currently executing agent processes.
  *
  * TODO: Child runs are not automatically cancelled. If this run has spawned
  * child runs, they will continue executing. Consider implementing cascading
@@ -428,19 +505,42 @@ runsRouter.post('/:id/cancel', async (c) => {
       return c.json({ error: `Cannot cancel run in ${run.status} state` }, 400);
     }
 
-    // Log the cancellation event
-    await journalService.appendEvent(runId, {
-      type: 'RUN_CANCELLED',
-      payload: {
-        reason: 'Cancelled by user',
-        cancelled_by: 'user',
-      },
-    });
+    if (USE_INNGEST) {
+      // Inngest path: Send cancellation event
+      // The function's cancelOn config will handle termination
+      await inngest.send({
+        name: 'agent/run.cancelled',
+        data: {
+          runId,
+          reason: 'Cancelled by user',
+        },
+      });
 
-    // Update status to cancelled
-    await journalService.updateStatus(runId, 'cancelled');
+      // Also update database for consistency
+      await journalService.appendEvent(runId, {
+        type: 'RUN_CANCELLED',
+        payload: {
+          reason: 'Cancelled by user',
+          cancelled_by: 'user',
+        },
+      });
+      await journalService.updateStatus(runId, 'cancelled');
 
-    logger.info({ runId }, 'Run cancelled by user');
+      logger.info({ runId, mode: 'inngest' }, 'Run cancelled via Inngest');
+    } else {
+      // Legacy path: Update database state only
+      await journalService.appendEvent(runId, {
+        type: 'RUN_CANCELLED',
+        payload: {
+          reason: 'Cancelled by user',
+          cancelled_by: 'user',
+        },
+      });
+      await journalService.updateStatus(runId, 'cancelled');
+
+      logger.info({ runId, mode: 'legacy' }, 'Run cancelled via database update');
+    }
+
     return c.json({ success: true });
   } catch (error: any) {
     logger.error({ error: error.message, runId }, 'Failed to cancel run');

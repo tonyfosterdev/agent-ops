@@ -1,0 +1,20 @@
+{
+  "name": "mock-llm",
+  "version": "1.0.0",
+  "description": "Mock LLM server for deterministic testing",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.0.0",
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}
