@@ -322,6 +322,22 @@ services:
       - loki
     restart: unless-stopped
 
+  # Inngest Dev Server - Durable execution engine with dashboard
+  inngest:
+    image: inngest/inngest:latest
+    container_name: inngest
+    command: 'inngest dev -u http://agent-server:3200/api/inngest --no-discovery --no-poll'
+    ports:
+      - "8288:8288"
+    networks:
+      - agentops-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.inngest.rule=Host(`inngest.localhost`)"
+      - "traefik.http.routers.inngest.entrypoints=web"
+      - "traefik.http.services.inngest.loadbalancer.server.port=8288"
+    restart: unless-stopped
+
   # Agent Server
   agent-server:
     build:
@@ -339,6 +355,10 @@ services:
       COMPOSE_PROJECT_NAME: agentops
       LOG_LEVEL: info
       LOKI_URL: http://loki:3100
+      # Inngest
+      USE_INNGEST: "true"
+      INNGEST_DEV: "1"
+      INNGEST_BASE_URL: http://inngest:8288
       # Ops Database
       OPS_DB_HOST: ops-db
       OPS_DB_PORT: 5432
@@ -355,6 +375,7 @@ services:
     depends_on:
       - loki
       - ops-db
+      - inngest
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.agent-server.rule=Host(`api.localhost`) && PathPrefix(`/agents`)"
