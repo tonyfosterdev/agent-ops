@@ -15,7 +15,12 @@ export function createApp() {
   app.use(
     '*',
     cors({
-      origin: ['http://localhost:5173', 'http://localhost:3000'], // Vite dev + local
+      origin: [
+        'http://localhost:5173',      // Vite dev server
+        'http://localhost:3000',      // Local dev
+        'http://localhost:3001',      // Dashboard (Docker)
+        'http://dashboard.localhost', // Dashboard (Traefik)
+      ],
       credentials: true,
     })
   );
