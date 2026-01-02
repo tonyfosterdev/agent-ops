@@ -365,8 +365,8 @@ services:
   # Agent Dashboard - React UI for managing agent runs and HITL approvals
   dashboard:
     build:
-      context: ./ops
-      dockerfile: packages/dashboard/Dockerfile
+      context: ./ops/packages/dashboard
+      dockerfile: Dockerfile
     container_name: dashboard
     environment:
       VITE_API_URL: http://agent-server:3200
