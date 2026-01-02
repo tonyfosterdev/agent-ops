@@ -9,6 +9,7 @@ interface UseRunResult {
   error: string | null;
   parentRunId: string | null;
   agentType: string | null;
+  refetch: () => Promise<void>;
 }
 
 // API_BASE: Use VITE_API_URL env var, fallback to empty string for dev proxy
@@ -114,7 +115,27 @@ export function useRun(runId: string | null): UseRunResult {
     };
   }, [runId]);
 
-  return { events, status, pendingTool, isLoading, error, parentRunId, agentType };
+  // Manual refetch for when SSE might be delayed/broken
+  const refetch = async () => {
+    if (!runId) return;
+    try {
+      const res = await fetch(`${API_BASE}/runs/${runId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setStatus(data.status);
+        setParentRunId(data.parent_run_id || null);
+        setAgentType(data.agent_type || null);
+        // Clear pending tool if run is no longer suspended
+        if (data.status !== 'suspended') {
+          setPendingTool(null);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to refetch run:', err);
+    }
+  };
+
+  return { events, status, pendingTool, isLoading, error, parentRunId, agentType, refetch };
 }
 
 export async function createRun(prompt: string, userId: string): Promise<string> {

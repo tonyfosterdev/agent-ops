@@ -9,7 +9,7 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     return params.get('runId');
   });
-  const { events, status, pendingTool, isLoading, error, parentRunId, agentType } = useRun(runId);
+  const { events, status, pendingTool, isLoading, error, parentRunId, agentType, refetch } = useRun(runId);
   const timelineEndRef = useRef<HTMLDivElement>(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -17,11 +17,15 @@ function App() {
   const handleApprove = async () => {
     if (!runId) return;
     await resumeRun(runId, 'approved');
+    // Refetch to update UI immediately (SSE might be delayed)
+    setTimeout(() => refetch(), 500);
   };
 
   const handleReject = async (feedback: string) => {
     if (!runId) return;
     await resumeRun(runId, 'rejected', feedback);
+    // Refetch to update UI immediately (SSE might be delayed)
+    setTimeout(() => refetch(), 500);
   };
 
   const handleNewRun = () => {
