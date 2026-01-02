@@ -2,6 +2,10 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Build arg for API URL (Vite bakes env vars at build time)
+ARG VITE_API_URL=http://localhost:3200
+ENV VITE_API_URL=$VITE_API_URL
+
 # Copy package files
 COPY package.json ./
 
@@ -16,7 +20,7 @@ COPY tailwind.config.js ./
 COPY postcss.config.js ./
 COPY src ./src
 
-# Build
+# Build (VITE_API_URL is baked into the bundle)
 RUN npm run build
 
 # Production stage with nginx

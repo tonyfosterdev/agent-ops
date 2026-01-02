@@ -11,7 +11,8 @@ interface UseRunResult {
   agentType: string | null;
 }
 
-const API_BASE = '';
+// API_BASE: Use VITE_API_URL env var, fallback to empty string for dev proxy
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export function useRun(runId: string | null): UseRunResult {
   const [events, setEvents] = useState<JournalEvent[]>([]);

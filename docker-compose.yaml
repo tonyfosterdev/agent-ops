@@ -388,9 +388,12 @@ services:
     build:
       context: ./ops/packages/dashboard
       dockerfile: Dockerfile
+      args:
+        # Build-time arg for Vite (browser needs external URL, not Docker internal)
+        VITE_API_URL: http://localhost:3200
     container_name: dashboard
     environment:
-      VITE_API_URL: http://agent-server:3200
+      VITE_API_URL: http://localhost:3200
     ports:
       - "3001:80"
     networks:
