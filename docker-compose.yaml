@@ -362,6 +362,27 @@ services:
       - "traefik.http.services.agent-server.loadbalancer.server.port=3200"
     restart: unless-stopped
 
+  # Agent Dashboard - React UI for managing agent runs and HITL approvals
+  dashboard:
+    build:
+      context: ./ops
+      dockerfile: packages/dashboard/Dockerfile
+    container_name: dashboard
+    environment:
+      VITE_API_URL: http://agent-server:3200
+    ports:
+      - "3001:80"
+    networks:
+      - agentops-network
+    depends_on:
+      - agent-server
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`dashboard.localhost`)"
+      - "traefik.http.routers.dashboard.entrypoints=web"
+      - "traefik.http.services.dashboard.loadbalancer.server.port=80"
+    restart: unless-stopped
+
 volumes:
   store-db-data:
   warehouse-alpha-db-data:
