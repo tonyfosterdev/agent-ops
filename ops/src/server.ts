@@ -103,8 +103,6 @@ app.on(['GET', 'POST', 'PUT'], '/api/inngest', (c) => {
   const handler = serveInngest({
     client: inngest,
     functions: inngestFunctions,
-    // In dev mode, allow connections from the dev server
-    ...(config.inngest.isDev && { serveHost: config.inngest.devServerUrl }),
   });
 
   return handler(c);

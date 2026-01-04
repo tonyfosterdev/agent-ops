@@ -378,6 +378,7 @@ services:
       # Inngest Configuration
       INNGEST_DEV: "true"
       INNGEST_DEV_SERVER_URL: http://inngest-dev:8288
+      INNGEST_BASE_URL: http://inngest-dev:8288
       # Ops Database
       OPS_DB_HOST: ops-db
       OPS_DB_PORT: 5432
