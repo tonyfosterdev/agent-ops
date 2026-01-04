@@ -95,6 +95,7 @@ services:
       POSTGRES_DB: ${OPS_DB_DATABASE:-ops_db}
     volumes:
       - ops-db-data:/var/lib/postgresql/data
+      - ./ops/src/db/schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "5435:5432"
     networks:

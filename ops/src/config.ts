@@ -66,6 +66,19 @@ function parseInt(value: string | undefined, defaultValue: number): number {
 }
 
 /**
+ * Build a PostgreSQL connection URL from components.
+ */
+function buildDatabaseUrl(opts: {
+  host: string;
+  port: string;
+  user: string;
+  password: string;
+  database: string;
+}): string {
+  return `postgres://${opts.user}:${opts.password}@${opts.host}:${opts.port}/${opts.database}`;
+}
+
+/**
  * Load configuration from environment variables.
  *
  * Provides sensible defaults for local development while
@@ -82,9 +95,16 @@ function loadConfig(): Config {
 
     database: {
       // Dedicated PostgreSQL instance for agent history
+      // Uses OPS_DB_* env vars to match existing docker-compose.yaml configuration
       url:
         process.env.AGENT_DATABASE_URL ??
-        'postgres://agentuser:agentpass@agent-db:5432/agent_db',
+        buildDatabaseUrl({
+          host: process.env.OPS_DB_HOST ?? 'ops-db',
+          port: process.env.OPS_DB_PORT ?? '5432',
+          user: process.env.OPS_DB_USERNAME ?? 'opsuser',
+          password: process.env.OPS_DB_PASSWORD ?? 'opspassword',
+          database: process.env.OPS_DB_DATABASE ?? 'ops_db',
+        }),
     },
 
     inngest: {
