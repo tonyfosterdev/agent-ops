@@ -8,6 +8,7 @@
  * - Shell Tools: Shell command execution (HITL required)
  * - Write Tools: File writing operations (HITL required)
  * - Loki Tools: Log querying from Grafana Loki (no HITL required)
+ * - State Tools: Network state mutation for agent communication (no HITL required)
  * - Security: Validation utilities for defense-in-depth
  */
 
@@ -43,6 +44,13 @@ export {
   lokiTools,
 } from './loki-tools.js';
 
+// State mutation tools (no HITL - these modify network state, not system state)
+export {
+  reportFindingsTool,
+  completeTaskTool,
+  stateTools,
+} from './state-tools.js';
+
 // Security utilities for defense-in-depth validation
 export {
   validateCommand,
@@ -58,18 +66,23 @@ import { fileTools as _fileTools } from './file-tools.js';
 import { shellTools as _shellTools, shellToolMetadata as _shellMeta } from './shell-tools.js';
 import { writeTools as _writeTools, writeToolMetadata as _writeMeta } from './write-tools.js';
 import { lokiTools as _lokiTools } from './loki-tools.js';
+import { stateTools as _stateTools } from './state-tools.js';
 
 /**
  * All standard tools (no HITL required).
  *
  * These tools are safe for autonomous agent operation as they
- * only read data and do not modify system state.
+ * only read data and do not modify system state. State tools are
+ * included here because they only modify network state (for agent
+ * communication), not external system state.
  */
 export const standardTools = [
   // File operations
   ..._fileTools,
   // Loki queries
   ..._lokiTools,
+  // State mutation (network state only, no external side effects)
+  ..._stateTools,
 ];
 
 /**
