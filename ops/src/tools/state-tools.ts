@@ -85,7 +85,7 @@ export const completeTaskTool = createTool({
     summary: z.string().describe('Summary of what was accomplished'),
     success: z.boolean().describe('Whether the task was completed successfully'),
     details: z
-      .record(z.unknown())
+      .record(z.string(), z.unknown())
       .optional()
       .describe('Additional details about the completion'),
   }),
