@@ -7,7 +7,32 @@
  * - Tool approval/rejection
  */
 
-const API_BASE = '/api';
+/**
+ * Runtime configuration type (set by docker-entrypoint.sh or dev fallback).
+ */
+interface RuntimeConfig {
+  apiUrl: string;
+  inngestDevUrl: string;
+}
+
+/**
+ * Get runtime configuration.
+ *
+ * In Docker: window.__AGENTOPS_CONFIG__ is set by docker-entrypoint.sh
+ * In dev: Falls back to relative /api path (Vite proxy handles this)
+ */
+function getConfig(): RuntimeConfig {
+  const windowConfig = (window as unknown as { __AGENTOPS_CONFIG__?: RuntimeConfig })
+    .__AGENTOPS_CONFIG__;
+
+  return {
+    apiUrl: windowConfig?.apiUrl ?? '/api',
+    inngestDevUrl: windowConfig?.inngestDevUrl ?? 'http://localhost:8288',
+  };
+}
+
+const config = getConfig();
+const API_BASE = config.apiUrl.endsWith('/') ? config.apiUrl.slice(0, -1) : config.apiUrl;
 
 /**
  * Thread metadata returned by the server.

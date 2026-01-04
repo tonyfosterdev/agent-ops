@@ -79,7 +79,7 @@ const app = new Hono();
 app.use(
   '*',
   cors({
-    origin: ['http://localhost:3001', 'http://localhost:5173', 'http://dashboard.localhost'],
+    origin: ['http://localhost:3001', 'http://localhost:5173', 'http://agents.localhost', 'http://dashboard.localhost'],
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization'],
     exposeHeaders: ['Content-Length'],
