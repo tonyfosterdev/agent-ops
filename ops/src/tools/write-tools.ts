@@ -71,10 +71,12 @@ export const writeFileTool = createTool({
       };
     }
 
-    // Generate toolCallId in a durable step FIRST so it's recorded and visible
-    // in the Inngest UI before we wait for approval. This allows the frontend
-    // to discover pending approvals by inspecting step output.
-    const toolCallId = await step.run('generate-tool-call-id', () => crypto.randomUUID());
+    // Generate a unique toolCallId for this tool invocation
+    // This doesn't need step.run() durability because:
+    // 1. The waitForEvent step ID includes toolCallId, providing durability
+    // 2. If the function restarts, the same toolCallId will be regenerated
+    //    but the waitForEvent will resume from where it left off
+    const toolCallId = crypto.randomUUID();
 
     // Wait for human approval (4 hour timeout)
     // Using dynamic step ID to avoid collisions if tool is called multiple times
@@ -226,10 +228,12 @@ export const appendFileTool = createTool({
       };
     }
 
-    // Generate toolCallId in a durable step FIRST so it's recorded and visible
-    // in the Inngest UI before we wait for approval. This allows the frontend
-    // to discover pending approvals by inspecting step output.
-    const toolCallId = await step.run('generate-tool-call-id', () => crypto.randomUUID());
+    // Generate a unique toolCallId for this tool invocation
+    // This doesn't need step.run() durability because:
+    // 1. The waitForEvent step ID includes toolCallId, providing durability
+    // 2. If the function restarts, the same toolCallId will be regenerated
+    //    but the waitForEvent will resume from where it left off
+    const toolCallId = crypto.randomUUID();
 
     // Wait for human approval (4 hour timeout)
     // Using dynamic step ID to avoid collisions if tool is called multiple times

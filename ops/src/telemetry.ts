@@ -61,7 +61,13 @@ function initTelemetry(): NodeSDK | null {
         },
         // Configure HTTP instrumentation
         '@opentelemetry/instrumentation-http': {
-          ignoreIncomingPaths: ['/health', '/healthz', '/ready'],
+          // Use ignoreIncomingRequestHook for proper filtering
+          ignoreIncomingRequestHook: (request) => {
+            const url = request.url || '';
+            return ['/health', '/healthz', '/ready'].some((path) =>
+              url.includes(path)
+            );
+          },
         },
       }),
     ],
