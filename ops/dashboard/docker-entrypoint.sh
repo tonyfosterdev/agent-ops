@@ -16,6 +16,9 @@ window.__AGENTOPS_CONFIG__ = {
 };
 EOF
 
+# Ensure nginx can read the file
+chmod 644 /usr/share/nginx/html/config.js
+
 echo "Generated runtime config:"
 cat /usr/share/nginx/html/config.js
 
