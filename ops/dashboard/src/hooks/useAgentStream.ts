@@ -233,7 +233,17 @@ function processStreamEvent(
     case 'run.error':
       setIsRunning(false);
       currentRunIdRef.current = null;
-      // Error handling could add a system message here
+      // Add error as a system message so it appears in the chat
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `error-${Date.now()}-${event.runId}`,
+          threadId: '',
+          role: 'system',
+          content: `Error: ${event.error || 'Unknown error occurred'}`,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
       break;
   }
 }

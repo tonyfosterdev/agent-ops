@@ -258,9 +258,17 @@ function MessageItem({
   const isSystem = message.role === 'system';
 
   if (isSystem) {
+    // Check if this is an error message
+    const isError = message.content.toLowerCase().startsWith('error:');
     return (
       <div className="flex justify-center my-4">
-        <div className="bg-gray-100 text-gray-500 text-sm px-4 py-2 rounded-full">
+        <div
+          className={`${
+            isError
+              ? 'bg-red-100 text-red-700 border border-red-200'
+              : 'bg-gray-100 text-gray-500'
+          } text-sm px-4 py-2 rounded-full`}
+        >
           {message.content}
         </div>
       </div>

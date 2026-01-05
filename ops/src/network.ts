@@ -57,29 +57,36 @@ export const agentNetwork = createNetwork({
   maxIter: 15,
 
   /**
-   * Hybrid router: code rules first, then AgentKit's built-in LLM routing.
+   * Sticky router: once an agent is selected, it keeps running until handoff.
    *
    * Routing priority:
    * 1. Check if work is complete (stop the network)
    * 2. Check for explicit handoff request via state
-   * 3. Apply keyword-based routing rules
-   * 4. Fall back to LLM routing for ambiguous cases
+   * 3. If an agent is already active, keep using it (sticky behavior)
+   * 4. For initial routing, use keyword-based rules on the INPUT only
+   *
+   * This prevents the router from switching agents based on agent output,
+   * which caused issues where agents would mention keywords that triggered
+   * routing to an agent without the required tools.
    */
   router: async ({ network, input, lastResult }) => {
     const state = network.state.kv;
 
     // 1. Check if work is complete - return undefined to stop the network
     if (state.get('complete')) {
+      state.delete('currentAgent'); // Clean up
       return undefined;
     }
 
     // 2. Check if an agent explicitly requested a handoff via state
-    // This takes priority over keyword matching because it represents
-    // an agent's deliberate decision based on its analysis
+    // This takes priority because it represents an agent's deliberate decision
     const nextAgent = state.get('route_to') as string | undefined;
     if (nextAgent) {
       // Clear the route_to flag to prevent routing loops
       state.delete('route_to');
+
+      // Update the current agent
+      state.set('currentAgent', nextAgent);
 
       if (nextAgent === 'coding') {
         return codingAgent;
@@ -89,29 +96,40 @@ export const agentNetwork = createNetwork({
       }
     }
 
-    // 3. Apply keyword-based routing rules for common patterns
-    // Use the input string or extract from last result
-    const messageContent = lastResult
-      ? extractMessageContent(lastResult.output[lastResult.output.length - 1])
-      : input;
-    const lowerContent = messageContent.toLowerCase();
-
-    // Route log-related queries to log-analyzer
-    if (containsLogKeywords(lowerContent)) {
-      return logAnalyzer;
+    // 3. Sticky behavior: if an agent is already running, keep using it
+    // This prevents switching based on agent output containing keywords
+    const currentAgent = state.get('currentAgent') as string | undefined;
+    if (currentAgent && lastResult) {
+      // Agent has already produced output, keep using the same agent
+      if (currentAgent === 'coding') {
+        return codingAgent;
+      }
+      if (currentAgent === 'log-analyzer') {
+        return logAnalyzer;
+      }
     }
 
-    // Route code-related queries to coding agent
-    if (containsCodeKeywords(lowerContent)) {
+    // 4. Initial routing: use keyword-based rules on the ORIGINAL INPUT only
+    // This only runs on the first iteration (when lastResult is undefined)
+    const lowerInput = input.toLowerCase();
+
+    // Check code keywords FIRST - coding agent can delegate to log-analyzer
+    // This prevents log-analyzer from trying to use code tools it doesn't have
+    if (containsCodeKeywords(lowerInput)) {
+      state.set('currentAgent', 'coding');
       return codingAgent;
     }
 
-    // 4. Fallback: Default to log-analyzer for investigation tasks
-    // The LLM routing agent can get confused and try to invoke agent tools
-    // directly. For now, default to log-analyzer since most ops tasks start
-    // with log investigation, and it can hand off to coding agent via state.
-    // This provides a more predictable starting point.
-    return logAnalyzer;
+    // Route log-related queries to log-analyzer
+    if (containsLogKeywords(lowerInput)) {
+      state.set('currentAgent', 'log-analyzer');
+      return logAnalyzer;
+    }
+
+    // 5. Fallback: Default to coding agent for general tasks
+    // Coding agent has more versatile tools and can hand off to log-analyzer
+    state.set('currentAgent', 'coding');
+    return codingAgent;
   },
 });
 
@@ -186,21 +204,50 @@ function containsLogKeywords(content: string): boolean {
  */
 function containsCodeKeywords(content: string): boolean {
   const codeKeywords = [
+    // Direct code references
     'code',
+    'codebase',
+    'source',
+    'src',
+    'file',
+    'files',
+    // Actions
     'fix',
     'debug',
+    'search',
+    'find',
+    'look',
+    'check',
+    'read',
+    'write',
+    'modify',
+    'change',
+    'update',
+    // Code structure
     'function',
     'class',
     'method',
     'variable',
+    'module',
+    'import',
+    'export',
+    // Tasks
     'implement',
     'refactor',
+    'review',
+    // Languages/tools
     'typescript',
     'javascript',
+    'python',
+    'node',
+    'npm',
+    // Dev tasks
     'test',
     'tests',
     'build',
     'compile',
+    'lint',
+    'type-check',
   ];
 
   return codeKeywords.some((keyword) => content.includes(keyword));
