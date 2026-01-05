@@ -404,7 +404,9 @@ export function MessageList({
           onDeny={onDeny}
         />
       ))}
-      {isLoading && <TypingIndicator />}
+      {/* Only show typing indicator when loading AND no pending approvals */}
+      {/* When waiting for approval, the approval UI is shown instead */}
+      {isLoading && pendingApprovals.length === 0 && <TypingIndicator />}
       <div ref={bottomRef} />
     </div>
   );

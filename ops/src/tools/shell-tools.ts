@@ -133,9 +133,12 @@ export const shellExecuteTool = createTool({
     // Wait for human approval (4 hour timeout)
     // The approval event must include the toolCallId in its data
     // Using dynamic step ID to avoid collisions if tool is called multiple times
+    // NOTE: We use 'if' instead of 'match' because 'match' compares against the
+    // triggering event (agent/chat) which doesn't have toolCallId. The 'if'
+    // expression filters incoming events by their data.toolCallId field.
     const approval = await step.waitForEvent(`wait-for-shell-approval-${toolCallId}`, {
       event: 'agentops/tool.approval',
-      match: 'data.toolCallId',
+      if: `async.data.toolCallId == "${toolCallId}"`,
       timeout: '4h',
     }).catch((err: Error) => {
       // Handle timeout gracefully - treat as rejection
