@@ -11,6 +11,12 @@
  * - Must be within the configured workspace root (WORK_DIR env var)
  * - Cannot contain sensitive patterns (.env, credentials, secrets, etc.)
  * This prevents obviously dangerous operations from reaching the approval queue.
+ *
+ * Real-time Streaming:
+ *
+ * Before calling waitForEvent, the tool publishes a 'tool.call' event to the
+ * realtime stream. This allows the dashboard to show the approval UI immediately.
+ * After execution (or rejection), it publishes a 'tool.result' event.
  */
 import { createTool } from '@inngest/agent-kit';
 import { z } from 'zod';
@@ -18,6 +24,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { validatePath } from './security.js';
+import type { AgentStreamEvent } from '../inngest/realtime.js';
 
 /**
  * Write content to a file.
@@ -71,12 +78,31 @@ export const writeFileTool = createTool({
       };
     }
 
-    // Generate a unique toolCallId for this tool invocation
-    // This doesn't need step.run() durability because:
-    // 1. The waitForEvent step ID includes toolCallId, providing durability
-    // 2. If the function restarts, the same toolCallId will be regenerated
-    //    but the waitForEvent will resume from where it left off
-    const toolCallId = crypto.randomUUID();
+    // Get the publish function from network state (set by the Inngest function)
+    const publishEvent = network?.state?.kv?.get('publish') as
+      | ((event: AgentStreamEvent) => void)
+      | undefined;
+
+    // Generate a unique toolCallId for this tool invocation DURABLY
+    // This MUST be inside step.run() to ensure the same ID is used if the function
+    // restarts between generating the ID and completing waitForEvent.
+    // Without this, a restart would generate a new ID and break approval correlation.
+    const toolCallId = await step.run('generate-write-file-id', () => crypto.randomUUID());
+
+    // Publish tool.call event BEFORE waiting for approval
+    // This allows the dashboard to show the approval UI immediately
+    if (publishEvent) {
+      publishEvent({
+        type: 'tool.call',
+        toolName: 'write_file',
+        toolCallId,
+        args: { path: absolutePath, contentLength: content.length, reason, createDirectories },
+        requiresApproval: true,
+        approvalRequestId: toolCallId,
+        reason,
+        agentName: network?.state?.kv?.get('agentName') as string | undefined,
+      });
+    }
 
     // Wait for human approval (4 hour timeout)
     // Using dynamic step ID to avoid collisions if tool is called multiple times
@@ -94,19 +120,33 @@ export const writeFileTool = createTool({
 
     // Check if approval was received and granted
     if (!approval || !approval.data.approved) {
-      return {
-        status: 'rejected',
+      const feedback = approval?.data?.feedback;
+      const result = {
+        status: 'rejected' as const,
         error: 'File write rejected by human',
-        feedback: approval?.data?.feedback,
+        feedback,
         path: absolutePath,
         reason,
         toolCallId,
       };
+
+      // Publish tool.result event for rejection
+      if (publishEvent) {
+        publishEvent({
+          type: 'tool.result',
+          toolCallId,
+          result,
+          isError: true,
+          rejectionFeedback: feedback,
+        });
+      }
+
+      return result;
     }
 
     // Execute the write operation with durability via step.run()
     // Using dynamic step ID to avoid collisions
-    return step.run(`write-file-${toolCallId}`, async () => {
+    const executionResult = await step.run(`write-file-${toolCallId}`, async () => {
       try {
         // Check if file exists for reporting
         let fileExisted = false;
@@ -128,6 +168,7 @@ export const writeFileTool = createTool({
           await fs.access(parentDir);
         } catch {
           return {
+            success: false,
             error: 'Parent directory does not exist',
             path: absolutePath,
             parentDir,
@@ -152,6 +193,7 @@ export const writeFileTool = createTool({
 
         if (error.code === 'EACCES') {
           return {
+            success: false,
             error: 'Permission denied',
             path: absolutePath,
             toolCallId,
@@ -159,6 +201,7 @@ export const writeFileTool = createTool({
         }
         if (error.code === 'ENOENT') {
           return {
+            success: false,
             error: 'Parent directory does not exist',
             path: absolutePath,
             hint: 'Set createDirectories: true to create parent directories automatically',
@@ -167,12 +210,25 @@ export const writeFileTool = createTool({
         }
 
         return {
+          success: false,
           error: `Failed to write file: ${error.message}`,
           path: absolutePath,
           toolCallId,
         };
       }
     });
+
+    // Publish tool.result event after execution
+    if (publishEvent) {
+      publishEvent({
+        type: 'tool.result',
+        toolCallId,
+        result: executionResult,
+        isError: !executionResult.success,
+      });
+    }
+
+    return executionResult;
   },
 });
 
@@ -228,12 +284,31 @@ export const appendFileTool = createTool({
       };
     }
 
-    // Generate a unique toolCallId for this tool invocation
-    // This doesn't need step.run() durability because:
-    // 1. The waitForEvent step ID includes toolCallId, providing durability
-    // 2. If the function restarts, the same toolCallId will be regenerated
-    //    but the waitForEvent will resume from where it left off
-    const toolCallId = crypto.randomUUID();
+    // Get the publish function from network state (set by the Inngest function)
+    const publishEvent = network?.state?.kv?.get('publish') as
+      | ((event: AgentStreamEvent) => void)
+      | undefined;
+
+    // Generate a unique toolCallId for this tool invocation DURABLY
+    // This MUST be inside step.run() to ensure the same ID is used if the function
+    // restarts between generating the ID and completing waitForEvent.
+    // Without this, a restart would generate a new ID and break approval correlation.
+    const toolCallId = await step.run('generate-append-file-id', () => crypto.randomUUID());
+
+    // Publish tool.call event BEFORE waiting for approval
+    // This allows the dashboard to show the approval UI immediately
+    if (publishEvent) {
+      publishEvent({
+        type: 'tool.call',
+        toolName: 'append_file',
+        toolCallId,
+        args: { path: absolutePath, contentLength: content.length, reason, createDirectories },
+        requiresApproval: true,
+        approvalRequestId: toolCallId,
+        reason,
+        agentName: network?.state?.kv?.get('agentName') as string | undefined,
+      });
+    }
 
     // Wait for human approval (4 hour timeout)
     // Using dynamic step ID to avoid collisions if tool is called multiple times
@@ -251,19 +326,33 @@ export const appendFileTool = createTool({
 
     // Check if approval was received and granted
     if (!approval || !approval.data.approved) {
-      return {
-        status: 'rejected',
+      const feedback = approval?.data?.feedback;
+      const result = {
+        status: 'rejected' as const,
         error: 'File append rejected by human',
-        feedback: approval?.data?.feedback,
+        feedback,
         path: absolutePath,
         reason,
         toolCallId,
       };
+
+      // Publish tool.result event for rejection
+      if (publishEvent) {
+        publishEvent({
+          type: 'tool.result',
+          toolCallId,
+          result,
+          isError: true,
+          rejectionFeedback: feedback,
+        });
+      }
+
+      return result;
     }
 
     // Execute the append operation with durability via step.run()
     // Using dynamic step ID to avoid collisions
-    return step.run(`append-file-${toolCallId}`, async () => {
+    const executionResult = await step.run(`append-file-${toolCallId}`, async () => {
       try {
         // Check if file exists for reporting
         let fileExisted = false;
@@ -293,12 +382,25 @@ export const appendFileTool = createTool({
         const error = err as NodeJS.ErrnoException;
 
         return {
+          success: false,
           error: `Failed to append to file: ${error.message}`,
           path: absolutePath,
           toolCallId,
         };
       }
     });
+
+    // Publish tool.result event after execution
+    if (publishEvent) {
+      publishEvent({
+        type: 'tool.result',
+        toolCallId,
+        result: executionResult,
+        isError: !executionResult.success,
+      });
+    }
+
+    return executionResult;
   },
 });
 

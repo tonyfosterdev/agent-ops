@@ -5,6 +5,7 @@
  * It combines message display, input handling, and HITL approvals.
  *
  * ## Features
+ * - Real-time streaming via Inngest Realtime
  * - Message history display with auto-scroll
  * - Input field with send button
  * - Loading indicator during agent processing
@@ -19,8 +20,9 @@
  */
 
 import { useState, useRef, KeyboardEvent, FormEvent } from 'react';
-import { useChat } from '@/hooks/useChat';
+import { useAgentStream } from '@/hooks/useAgentStream';
 import { MessageList } from './MessageList';
+import type { StreamStatus } from '@/hooks/types';
 
 export interface ChatProps {
   /** User identifier for thread ownership */
@@ -191,13 +193,51 @@ function ErrorBanner({
 }
 
 /**
+ * Get status indicator color based on stream status.
+ */
+function getStatusColor(status: StreamStatus): string {
+  switch (status) {
+    case 'connected':
+      return 'bg-green-500';
+    case 'running':
+      return 'bg-yellow-500 animate-pulse';
+    case 'connecting':
+      return 'bg-blue-500 animate-pulse';
+    case 'error':
+      return 'bg-red-500';
+    default:
+      return 'bg-gray-400';
+  }
+}
+
+/**
+ * Get status text based on stream status.
+ */
+function getStatusText(status: StreamStatus): string {
+  switch (status) {
+    case 'connected':
+      return 'Connected';
+    case 'running':
+      return 'Processing...';
+    case 'connecting':
+      return 'Connecting...';
+    case 'error':
+      return 'Connection error';
+    default:
+      return 'Disconnected';
+  }
+}
+
+/**
  * Chat header component.
  */
 function ChatHeader({
   threadId,
+  status,
   onNewThread,
 }: {
   threadId: string | null;
+  status: StreamStatus;
   onNewThread: () => void;
 }) {
   return (
@@ -221,9 +261,15 @@ function ChatHeader({
           </div>
           <div>
             <h1 className="font-semibold text-gray-900">AgentOps</h1>
-            <p className="text-xs text-gray-500">
-              {threadId ? `Thread: ${threadId.slice(0, 8)}...` : 'New conversation'}
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs text-gray-500">
+                {threadId ? `Thread: ${threadId.slice(0, 8)}...` : 'New conversation'}
+              </p>
+              <div className="flex items-center gap-1">
+                <div className={`w-2 h-2 rounded-full ${getStatusColor(status)}`} />
+                <span className="text-xs text-gray-400">{getStatusText(status)}</span>
+              </div>
+            </div>
           </div>
         </div>
         <button
@@ -254,14 +300,15 @@ export function Chat({ userId, threadId: initialThreadId }: ChatProps) {
   const {
     threadId,
     messages,
-    isLoading,
+    isRunning,
+    status,
     error,
     pendingApprovals,
     sendMessage,
     submitApproval,
     clearError,
     createNewThread,
-  } = useChat({ userId, threadId: initialThreadId });
+  } = useAgentStream({ userId, threadId: initialThreadId });
 
   const handleApprove = (runId: string, toolCallId: string) => {
     submitApproval(runId, toolCallId, true);
@@ -281,21 +328,21 @@ export function Chat({ userId, threadId: initialThreadId }: ChatProps) {
 
   return (
     <div className="flex flex-col h-screen bg-gray-50">
-      <ChatHeader threadId={threadId} onNewThread={handleNewThread} />
+      <ChatHeader threadId={threadId} status={status} onNewThread={handleNewThread} />
 
       {error && <ErrorBanner message={error} onDismiss={clearError} />}
 
       <div className="flex-1 overflow-hidden max-w-4xl w-full mx-auto">
         <MessageList
           messages={messages}
-          isLoading={isLoading}
+          isLoading={isRunning}
           pendingApprovals={pendingApprovals}
           onApprove={handleApprove}
           onDeny={handleDeny}
         />
       </div>
 
-      <ChatInput onSend={sendMessage} disabled={isLoading} />
+      <ChatInput onSend={sendMessage} disabled={isRunning} />
     </div>
   );
 }

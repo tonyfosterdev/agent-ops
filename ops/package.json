@@ -14,6 +14,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
     "@inngest/agent-kit": "^0.13.2",
+    "@inngest/realtime": "^0.4.5",
     "@opentelemetry/auto-instrumentations-node": "^0.52.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.56.0",
     "@opentelemetry/sdk-node": "^0.56.0",

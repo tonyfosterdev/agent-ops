@@ -36,6 +36,8 @@ export interface ToolApprovalProps {
   runId: string;
   /** Agent that requested this tool (optional) */
   agentName?: string;
+  /** Reason provided by the agent for why this tool needs to run */
+  reason?: string;
   /** Callback when user approves */
   onApprove: () => void;
   /** Callback when user denies with optional feedback */
@@ -84,6 +86,7 @@ export function ToolApproval({
   tool,
   runId,
   agentName,
+  reason,
   onApprove,
   onDeny,
   isSubmitting = false,
@@ -92,7 +95,7 @@ export function ToolApproval({
   const [showFeedback, setShowFeedback] = useState(false);
 
   const riskLevel = getToolRiskLevel(tool.name);
-  const description = getToolDescription(tool.name);
+  const description = reason || getToolDescription(tool.name);
 
   const handleDeny = () => {
     onDeny(feedback);

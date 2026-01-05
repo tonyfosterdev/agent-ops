@@ -33,7 +33,7 @@
  * ```
  */
 
-import { createNetwork, getDefaultRoutingAgent, type Agent } from '@inngest/agent-kit';
+import { createNetwork, type Agent } from '@inngest/agent-kit';
 import { anthropic } from '@inngest/agent-kit';
 import { codingAgent, logAnalyzer } from './agents/index.js';
 
@@ -106,10 +106,12 @@ export const agentNetwork = createNetwork({
       return codingAgent;
     }
 
-    // 4. Fallback to AgentKit's built-in LLM routing agent
-    // This agent uses the defaultModel to analyze the request and
-    // select the most appropriate agent based on agent descriptions
-    return getDefaultRoutingAgent();
+    // 4. Fallback: Default to log-analyzer for investigation tasks
+    // The LLM routing agent can get confused and try to invoke agent tools
+    // directly. For now, default to log-analyzer since most ops tasks start
+    // with log investigation, and it can hand off to coding agent via state.
+    // This provides a more predictable starting point.
+    return logAnalyzer;
   },
 });
 

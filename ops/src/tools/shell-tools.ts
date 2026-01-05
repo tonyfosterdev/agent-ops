@@ -22,12 +22,19 @@
  * Commands are validated against an allowlist BEFORE being sent for HITL approval.
  * This prevents obviously dangerous commands from even reaching the approval queue.
  * The allowlist is defined in security.ts and includes common safe commands.
+ *
+ * Real-time Streaming:
+ *
+ * Before calling waitForEvent, the tool publishes a 'tool.call' event to the
+ * realtime stream. This allows the dashboard to show the approval UI immediately.
+ * After execution (or rejection), it publishes a 'tool.result' event.
  */
 import { createTool } from '@inngest/agent-kit';
 import { z } from 'zod';
 import { execSync } from 'node:child_process';
 import * as crypto from 'node:crypto';
 import { validateCommand } from './security.js';
+import type { AgentStreamEvent } from '../inngest/realtime.js';
 
 /**
  * Result type for HITL tools that require approval.
@@ -84,6 +91,11 @@ export const shellExecuteTool = createTool({
       };
     }
 
+    // Get the publish function from network state (set by the Inngest function)
+    const publishEvent = network?.state?.kv?.get('publish') as
+      | ((event: AgentStreamEvent) => void)
+      | undefined;
+
     // Validate command against allowlist BEFORE waiting for approval
     // This provides defense-in-depth by rejecting obviously dangerous commands
     const validation = validateCommand(command);
@@ -97,12 +109,26 @@ export const shellExecuteTool = createTool({
       };
     }
 
-    // Generate a unique toolCallId for this tool invocation
-    // This doesn't need step.run() durability because:
-    // 1. The waitForEvent step ID includes toolCallId, providing durability
-    // 2. If the function restarts, the same toolCallId will be regenerated
-    //    but the waitForEvent will resume from where it left off
-    const toolCallId = crypto.randomUUID();
+    // Generate a unique toolCallId for this tool invocation DURABLY
+    // This MUST be inside step.run() to ensure the same ID is used if the function
+    // restarts between generating the ID and completing waitForEvent.
+    // Without this, a restart would generate a new ID and break approval correlation.
+    const toolCallId = await step.run('generate-shell-tool-id', () => crypto.randomUUID());
+
+    // Publish tool.call event BEFORE waiting for approval
+    // This allows the dashboard to show the approval UI immediately
+    if (publishEvent) {
+      publishEvent({
+        type: 'tool.call',
+        toolName: 'shell_command_execute',
+        toolCallId,
+        args: { command, reason, workingDirectory, timeout },
+        requiresApproval: true,
+        approvalRequestId: toolCallId,
+        reason,
+        agentName: network?.state?.kv?.get('agentName') as string | undefined,
+      });
+    }
 
     // Wait for human approval (4 hour timeout)
     // The approval event must include the toolCallId in its data
@@ -121,19 +147,33 @@ export const shellExecuteTool = createTool({
 
     // Check if approval was received and granted
     if (!approval || !approval.data.approved) {
-      return {
-        status: 'rejected',
+      const feedback = approval?.data?.feedback;
+      const result = {
+        status: 'rejected' as const,
         error: 'Command rejected by human',
-        feedback: approval?.data?.feedback,
+        feedback,
         command,
         reason,
         toolCallId,
       };
+
+      // Publish tool.result event for rejection
+      if (publishEvent) {
+        publishEvent({
+          type: 'tool.result',
+          toolCallId,
+          result,
+          isError: true,
+          rejectionFeedback: feedback,
+        });
+      }
+
+      return result;
     }
 
     // Execute the command with durability via step.run()
     // Using dynamic step ID to avoid collisions
-    return step.run(`execute-shell-command-${toolCallId}`, async () => {
+    const executionResult = await step.run(`execute-shell-command-${toolCallId}`, async () => {
       try {
         const options: {
           encoding: 'utf-8';
@@ -166,6 +206,7 @@ export const shellExecuteTool = createTool({
         };
 
         return {
+          success: false,
           error: 'Command execution failed',
           message: error.message,
           exitCode: error.status,
@@ -176,6 +217,18 @@ export const shellExecuteTool = createTool({
         };
       }
     });
+
+    // Publish tool.result event after execution
+    if (publishEvent) {
+      publishEvent({
+        type: 'tool.result',
+        toolCallId,
+        result: executionResult,
+        isError: !executionResult.success,
+      });
+    }
+
+    return executionResult;
   },
 });
 

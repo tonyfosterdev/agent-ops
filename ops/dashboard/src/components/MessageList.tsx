@@ -8,6 +8,7 @@
  * - Tool calls and results within messages
  *
  * ## Features
+ * - Real-time streaming message updates
  * - Auto-scroll to bottom on new messages
  * - Markdown-like code block rendering
  * - Tool call visualization
@@ -15,12 +16,12 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { Message, MessagePart, PendingApproval } from '@/api/client';
+import type { StreamMessage, StreamMessagePart, PendingApproval } from '@/hooks/types';
 import { ToolApproval } from './ToolApproval';
 
 export interface MessageListProps {
   /** Messages to display */
-  messages: Message[];
+  messages: StreamMessage[];
   /** Whether agent is currently processing */
   isLoading: boolean;
   /** Pending tool approvals */
@@ -104,7 +105,7 @@ function ToolCallPart({
   onApprove,
   onDeny,
 }: {
-  part: Extract<MessagePart, { type: 'tool-call' }>;
+  part: Extract<StreamMessagePart, { type: 'tool-call' }>;
   pendingApproval?: PendingApproval;
   onApprove: (runId: string, toolCallId: string) => void;
   onDeny: (runId: string, toolCallId: string, reason: string) => void;
@@ -116,6 +117,7 @@ function ToolCallPart({
         tool={{ id: part.id, name: part.name, args: part.args }}
         runId={pendingApproval.runId}
         agentName={pendingApproval.agentName}
+        reason={part.reason}
         onApprove={() => onApprove(pendingApproval.runId, part.id)}
         onDeny={(reason) => onDeny(pendingApproval.runId, part.id, reason)}
       />
@@ -127,9 +129,10 @@ function ToolCallPart({
     pending: 'bg-yellow-50 border-yellow-200',
     approved: 'bg-green-50 border-green-200',
     rejected: 'bg-red-50 border-red-200',
+    completed: 'bg-green-50 border-green-200',
   };
 
-  const status = part.status || 'approved';
+  const status = part.status || 'completed';
   const colors = statusColors[status];
 
   return (
@@ -155,7 +158,7 @@ function ToolCallPart({
           />
         </svg>
         <span className="font-mono font-medium">{part.name}</span>
-        {status !== 'approved' && (
+        {status !== 'completed' && (
           <span
             className={`text-xs px-2 py-0.5 rounded ${
               status === 'pending' ? 'bg-yellow-200 text-yellow-800' : 'bg-red-200 text-red-800'
@@ -165,6 +168,9 @@ function ToolCallPart({
           </span>
         )}
       </div>
+      {part.reason && (
+        <p className="text-xs text-gray-600 mb-2 italic">{part.reason}</p>
+      )}
       <pre className="bg-gray-100 rounded p-2 overflow-x-auto text-xs font-mono">
         {JSON.stringify(part.args, null, 2)}
       </pre>
@@ -178,7 +184,7 @@ function ToolCallPart({
 function ToolResultPart({
   part,
 }: {
-  part: Extract<MessagePart, { type: 'tool-result' }>;
+  part: Extract<StreamMessagePart, { type: 'tool-result' }>;
 }) {
   const isError = part.isError;
 
@@ -220,6 +226,11 @@ function ToolResultPart({
         )}
         <span className="font-medium">{isError ? 'Error' : 'Result'}</span>
       </div>
+      {part.rejectionFeedback && (
+        <p className="text-xs text-red-600 mb-2 italic">
+          Rejected: {part.rejectionFeedback}
+        </p>
+      )}
       <pre className="bg-gray-900 text-gray-100 rounded p-2 overflow-x-auto text-xs font-mono">
         {typeof part.result === 'string'
           ? part.result
@@ -238,7 +249,7 @@ function MessageItem({
   onApprove,
   onDeny,
 }: {
-  message: Message;
+  message: StreamMessage;
   pendingApprovals: PendingApproval[];
   onApprove: (runId: string, toolCallId: string) => void;
   onDeny: (runId: string, toolCallId: string, reason: string) => void;

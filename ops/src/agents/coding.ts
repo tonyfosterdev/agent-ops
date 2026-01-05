@@ -49,6 +49,13 @@ Log findings are available but could not be displayed. Proceed with code investi
 
     return `You are a coding agent specializing in debugging and code repairs.
 
+IMPORTANT: You only have access to the following tools. Do not attempt to use any other tools:
+- read_file: Read the contents of a file
+- search_code: Search for patterns in code files
+- shell_command_execute: Execute shell commands (requires human approval)
+- write_file: Write content to a file (requires human approval)
+- complete_task: Mark your task as complete
+
 Your capabilities:
 - Read files to understand code structure and identify issues
 - Search code for patterns, function definitions, and error sources

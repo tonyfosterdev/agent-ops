@@ -5,6 +5,7 @@
  * - Thread management (create, list, get messages)
  * - Chat message sending
  * - Tool approval/rejection
+ * - Real-time subscription tokens
  */
 
 /**
@@ -211,17 +212,21 @@ export async function sendMessage(
  * @param runId - Inngest run ID for correlation
  * @param toolCallId - ID of the tool call
  * @param approved - Whether the tool execution is approved
+ * @param threadId - Thread UUID for authorization
+ * @param userId - User ID for authorization
  * @param feedback - Optional feedback message
  */
 export async function submitApproval(
   runId: string,
   toolCallId: string,
   approved: boolean,
+  threadId: string,
+  userId: string,
   feedback?: string
 ): Promise<{ ok: boolean }> {
   return apiFetch('/approve', {
     method: 'POST',
-    body: JSON.stringify({ runId, toolCallId, approved, feedback }),
+    body: JSON.stringify({ runId, toolCallId, approved, feedback, threadId, userId }),
   });
 }
 
@@ -234,4 +239,38 @@ export async function healthCheck(): Promise<{
   timestamp: string;
 }> {
   return apiFetch('/health');
+}
+
+/**
+ * Subscription token structure returned from server.
+ * This matches the Inngest Realtime Token type.
+ */
+export interface RealtimeToken {
+  key?: string;
+  channel: string;
+  topics: string[];
+}
+
+/**
+ * Get a real-time subscription token for a thread.
+ *
+ * The token is used with useInngestSubscription to receive
+ * streaming events for the specified thread.
+ *
+ * @param threadId - Thread UUID to subscribe to
+ * @param userId - User ID for authorization (must own the thread)
+ * @returns Subscription token for Inngest Realtime
+ */
+export async function getRealtimeToken(
+  threadId: string,
+  userId: string
+): Promise<{ token: RealtimeToken }> {
+  return apiFetch(`/realtime/token?threadId=${encodeURIComponent(threadId)}&userId=${encodeURIComponent(userId)}`);
+}
+
+/**
+ * Export the Inngest Dev URL for direct event posting if needed.
+ */
+export function getInngestDevUrl(): string {
+  return config.inngestDevUrl;
 }

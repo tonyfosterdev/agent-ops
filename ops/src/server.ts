@@ -4,6 +4,7 @@
  * Provides HTTP endpoints for:
  * - AgentKit network execution via Inngest
  * - Thread management for conversation persistence
+ * - Real-time streaming tokens for dashboard updates
  * - Health checks for container orchestration
  *
  * ## Endpoints
@@ -15,6 +16,9 @@
  * - POST /threads - Create a new conversation thread
  * - GET /threads/:userId - List threads for a user
  * - GET /threads/:threadId/messages - Get messages for a thread
+ *
+ * ### Real-time Streaming
+ * - GET /realtime/token - Get subscription token for a thread's stream
  *
  * ### Operations
  * - GET /health - Health check endpoint
@@ -31,8 +35,9 @@ import { Hono } from 'hono';
 import { serve as serveHono } from '@hono/node-server';
 import { serve as serveInngest } from 'inngest/hono';
 import { cors } from 'hono/cors';
+import { getSubscriptionToken } from '@inngest/realtime';
 import { inngest } from './inngest.js';
-import { inngestFunctions } from './inngest/index.js';
+import { inngestFunctions, agentChannel, AGENT_STREAM_TOPIC } from './inngest/index.js';
 import { historyAdapter } from './db/index.js';
 import { config, validateConfig } from './config.js';
 
@@ -258,18 +263,25 @@ app.post('/chat', async (c) => {
  * - toolCallId: ID of the tool call being approved/rejected
  * - approved: boolean indicating approval status
  * - feedback: Optional feedback message
+ * - threadId: Thread UUID for authorization check
+ * - userId: User ID for authorization check
  *
  * Response:
  * - ok: true if event was sent successfully
+ *
+ * Security:
+ * - Verifies user owns the thread before allowing approval
  */
 app.post('/approve', async (c) => {
   try {
     const body = await c.req.json();
-    const { runId, toolCallId, approved, feedback } = body as {
+    const { runId, toolCallId, approved, feedback, threadId, userId } = body as {
       runId: string;
       toolCallId: string;
       approved: boolean;
       feedback?: string;
+      threadId: string;
+      userId: string;
     };
 
     // Validate runId (Inngest run IDs are ULIDs, but we accept any non-empty string)
@@ -290,6 +302,29 @@ app.post('/approve', async (c) => {
       return c.json({ error: 'approved must be a boolean' }, 400);
     }
 
+    // Validate threadId for authorization
+    if (!threadId) {
+      return c.json({ error: 'threadId is required for authorization' }, 400);
+    }
+    if (!isValidUUID(threadId)) {
+      return c.json({ error: 'threadId must be a valid UUID' }, 400);
+    }
+
+    // Validate userId for authorization
+    if (!userId) {
+      return c.json({ error: 'userId is required for authorization' }, 400);
+    }
+
+    // Verify user owns this thread before allowing approval
+    const thread = await historyAdapter.getThread(threadId);
+    if (!thread) {
+      return c.json({ error: 'Thread not found' }, 404);
+    }
+
+    if (thread.userId !== userId) {
+      return c.json({ error: 'Unauthorized: you do not own this thread' }, 403);
+    }
+
     // Send approval event to Inngest
     await inngest.send({
       name: 'agentops/tool.approval',
@@ -300,6 +335,66 @@ app.post('/approve', async (c) => {
   } catch (error) {
     console.error('Failed to send approval event:', error);
     return c.json({ error: 'Failed to send approval event' }, 500);
+  }
+});
+
+// Real-time Streaming Endpoints
+
+/**
+ * Get a subscription token for real-time streaming.
+ *
+ * Generates a time-limited, scoped token that allows the dashboard
+ * to subscribe to agent stream events for a specific thread.
+ *
+ * Query parameters:
+ * - threadId: UUID of the thread to subscribe to
+ * - userId: User ID for ownership verification
+ *
+ * Response:
+ * - token: Subscription token for use with useInngestSubscription
+ *
+ * Security:
+ * - Verifies user owns the thread before issuing token
+ * - Tokens are time-limited (default TTL set by Inngest)
+ * - Tokens are scoped to specific channels and topics
+ */
+app.get('/realtime/token', async (c) => {
+  try {
+    const threadId = c.req.query('threadId');
+    const userId = c.req.query('userId');
+
+    if (!threadId) {
+      return c.json({ error: 'threadId is required' }, 400);
+    }
+
+    if (!isValidUUID(threadId)) {
+      return c.json({ error: 'threadId must be a valid UUID' }, 400);
+    }
+
+    if (!userId) {
+      return c.json({ error: 'userId is required for authorization' }, 400);
+    }
+
+    // Verify user owns this thread
+    const thread = await historyAdapter.getThread(threadId);
+    if (!thread) {
+      return c.json({ error: 'Thread not found' }, 404);
+    }
+
+    if (thread.userId !== userId) {
+      return c.json({ error: 'Unauthorized: you do not own this thread' }, 403);
+    }
+
+    // Generate subscription token for this thread's channel
+    const token = await getSubscriptionToken(inngest, {
+      channel: agentChannel({ threadId }),
+      topics: [AGENT_STREAM_TOPIC],
+    });
+
+    return c.json({ token });
+  } catch (error) {
+    console.error('Failed to generate subscription token:', error);
+    return c.json({ error: 'Failed to generate subscription token' }, 500);
   }
 });
 
@@ -314,6 +409,7 @@ console.log(`  Health check: http://localhost:${port}/health`);
 console.log(`  Inngest endpoint: http://localhost:${port}/api/inngest`);
 console.log(`  Thread management: http://localhost:${port}/threads`);
 console.log(`  Chat endpoint: http://localhost:${port}/chat`);
+console.log(`  Realtime token: http://localhost:${port}/realtime/token`);
 
 serveHono({
   fetch: app.fetch,

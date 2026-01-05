@@ -7,7 +7,7 @@ This document describes the architecture for the OpsAgent system, migrated from 
 - **Durable Execution**: Inngest step functions provide automatic crash recovery
 - **Human-in-the-Loop (HITL)**: Dangerous operations pause for human approval
 - **Multi-Agent Orchestration**: Network-based routing between specialized agents
-- **Real-time Streaming**: Dashboard receives live updates via SSE
+- **Real-time Streaming**: Dashboard receives live updates via `useInngestSubscription` from `@inngest/realtime/hooks`
 - **Distributed Tracing**: OpenTelemetry integration with Tempo
 
 ---
@@ -414,6 +414,169 @@ export const writeFileTool = {
 
 ---
 
+## Real-time Streaming Architecture
+
+### Overview
+
+The dashboard receives live updates via Inngest's Realtime infrastructure and the `useInngestSubscription` hook from `@inngest/realtime/hooks`. This replaces manual polling with true streaming.
+
+### Components
+
+```
+┌───────────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│      Dashboard        │     │  Agent Server   │     │  Inngest Dev    │
+│       (React)         │     │    (Hono)       │     │     Server      │
+│                       │     │                 │     │                 │
+│ useInngestSubscription│     │ /chat           │────►│ Event Queue     │
+│         │             │     │                 │     │                 │
+│         │ GET token   │     │ agentChat fn ◄──┼─────┤ Function Run    │
+│         │─────────────┼────►│ /realtime/token │     │                 │
+│         │             │     │   │             │     │                 │
+│         │             │     │   │ publish()   │     │                 │
+│         │◄────────────┼─────┼───┘             │     │                 │
+│    (streaming)        │     │ Realtime        │     │                 │
+│                       │     │ Channel         │     │                 │
+└───────────────────────┘     └─────────────────┘     └─────────────────┘
+```
+
+### Streaming Flow
+
+1. **User sends message** → `POST /chat` with threadId, message
+2. **Dashboard fetches token** → `GET /realtime/token?threadId=...`
+3. **Dashboard subscribes** → `useInngestSubscription({ refreshToken })`
+4. **Server sends Inngest event** → `agent/chat`
+5. **Inngest runs function** → `agentChat` executes network
+6. **Function publishes updates** → `publish({ channel, topic, data })`
+7. **Dashboard receives stream** → `useInngestSubscription().data` updates
+8. **UI renders events** → Text deltas, tool-calls, tool-results in real-time
+
+### Event Types Published
+
+| Event Type | When | Payload |
+|------------|------|---------|
+| `run.started` | Agent run begins | `{ runId }` |
+| `text.delta` | Agent generates text | `{ content: "partial..." }` |
+| `tool.call` | Agent calls a tool | `{ toolName, args, toolCallId, requiresApproval }` |
+| `tool.result` | Tool execution completes | `{ toolCallId, result, isError }` |
+| `run.complete` | Network execution finishes | `{}` |
+| `run.error` | Execution failed | `{ error: "message" }` |
+
+### useInngestSubscription Hook
+
+```typescript
+import { useInngestSubscription } from '@inngest/realtime/hooks';
+
+const { data, error, state, latestData, clear } = useInngestSubscription({
+  enabled: !!threadId,
+  refreshToken: () => fetchSubscriptionToken(threadId),
+});
+```
+
+**Return Values**:
+| Property | Type | Description |
+|----------|------|-------------|
+| `data` | `Array<Message>` | All messages in chronological order |
+| `latestData` | `Message` | Most recent message |
+| `error` | `Error \| null` | Subscription errors |
+| `state` | `InngestSubscriptionState` | Connection state |
+| `clear` | `() => void` | Clear accumulated data |
+
+**Connection States**: `"closed"`, `"connecting"`, `"active"`, `"error"`, `"refresh_token"`, `"closing"`
+
+### Token-based Authentication
+
+Frontend subscribes to realtime updates via a signed token:
+
+```typescript
+// Server: Generate subscription token
+import { getSubscriptionToken } from '@inngest/realtime';
+
+app.get('/realtime/token', async (c) => {
+  const threadId = c.req.query('threadId');
+
+  // IMPORTANT: Verify user owns this thread before issuing token
+  // const userId = getUserIdFromAuth(c);
+  // const thread = await getThread(threadId);
+  // if (thread.userId !== userId) return c.json({ error: 'Unauthorized' }, 403);
+
+  const token = await getSubscriptionToken(inngest, {
+    channel: createAgentChannel(threadId),
+    topics: ['agent_stream'],
+  });
+
+  return c.json({ token });
+});
+
+// Dashboard: Use token for subscription
+useInngestSubscription({
+  refreshToken: async () => {
+    const res = await fetch(`/realtime/token?threadId=${threadId}`);
+    return res.json();
+  },
+});
+```
+
+### Server-side Publishing
+
+```typescript
+// ops/src/inngest/functions.ts
+export const agentChat = inngest.createFunction(
+  { id: 'agent-chat' },
+  { event: 'agent/chat' },
+  async ({ event, step, publish }) => {
+    const { threadId, message } = event.data;
+
+    // Publish events to thread channel
+    publish({
+      channel: `thread:${threadId}`,
+      topic: 'agent_stream',
+      data: { type: 'run.started', runId: event.id },
+    });
+
+    // ... agent execution ...
+
+    publish({
+      channel: `thread:${threadId}`,
+      topic: 'agent_stream',
+      data: { type: 'run.complete' },
+    });
+  }
+);
+```
+
+### HITL Streaming Flow
+
+When a tool requires human approval, the function **suspends** at `step.waitForEvent()`. Events must be published before suspension:
+
+```
+Agent calls HITL tool
+    │
+    ├─► publish({ type: 'tool.call', requiresApproval: true, approvalRequestId })
+    │
+    ▼
+step.waitForEvent('agentops/tool.approval')  ─── FUNCTION SUSPENDS
+    │
+    │   [Dashboard shows approval UI]
+    │   [User clicks Approve/Reject]
+    │   [Dashboard POSTs to Inngest: agentops/tool.approval event]
+    │
+    ▼
+FUNCTION RESUMES
+    │
+    ├─► Execute tool (if approved)
+    ├─► publish({ type: 'tool.result', ... })
+    │
+    ▼
+Continue agent execution
+```
+
+**Key Points**:
+- `tool.call` with `requiresApproval: true` signals the UI to show approval buttons
+- Approval events are sent directly to Inngest via `POST /e/{eventKey}`, not through streaming
+- Dashboard waits for `tool.result` event to confirm the approval was processed
+
+---
+
 ## Durability Guarantees
 
 ### Inngest Step Functions
@@ -815,14 +978,16 @@ ops/
 │   ├── src/
 │   │   ├── main.tsx          # React entry point
 │   │   ├── App.tsx           # Main app component
-│   │   ├── types.ts          # TypeScript types
+│   │   ├── api/
+│   │   │   └── client.ts     # API client with runtime config
 │   │   ├── hooks/
-│   │   │   └── useAgentRun.ts # Run state management
+│   │   │   ├── useAgentStream.ts  # useInngestSubscription wrapper (STREAMING)
+│   │   │   └── types.ts           # Stream event types
 │   │   └── components/
-│   │       ├── PromptInput.tsx    # Task submission
-│   │       ├── ThoughtStream.tsx  # Activity display
-│   │       └── ApprovalModal.tsx  # HITL approval UI
-│   ├── package.json
+│   │       ├── Chat.tsx          # Main chat interface
+│   │       ├── MessageList.tsx   # Parts-based message rendering
+│   │       └── ToolApproval.tsx  # HITL approval UI
+│   ├── package.json          # Includes @inngest/realtime
 │   ├── vite.config.ts
 │   └── Dockerfile
 ├── package.json

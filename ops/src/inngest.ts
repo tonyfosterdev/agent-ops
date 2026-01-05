@@ -3,8 +3,12 @@
  *
  * This client is used by all Inngest functions and the AgentKit network
  * to coordinate durable execution and event-driven workflows.
+ *
+ * Includes realtimeMiddleware for streaming updates to the dashboard
+ * via Inngest's realtime infrastructure.
  */
 import { Inngest, EventSchemas } from 'inngest';
+import { realtimeMiddleware } from '@inngest/realtime/middleware';
 import { config } from './config.js';
 
 /**
@@ -46,4 +50,6 @@ export const inngest = new Inngest({
   schemas: agentOpsEventSchemas,
   // Event key is optional in dev mode but required for production
   ...(config.inngest.eventKey && { eventKey: config.inngest.eventKey }),
+  // Enable realtime streaming for dashboard updates
+  middleware: [realtimeMiddleware()],
 });
