@@ -39,6 +39,7 @@ import { getSubscriptionToken } from '@inngest/realtime';
 import { inngest } from './inngest.js';
 import { inngestFunctions, agentChannel, AGENT_STREAM_TOPIC } from './inngest/index.js';
 import { historyAdapter } from './db/index.js';
+import { ensureSchema } from './db/postgres.js';
 import { config, validateConfig } from './config.js';
 
 /**
@@ -404,17 +405,30 @@ validateConfig();
 const port = config.server.port;
 const host = config.server.host;
 
-console.log(`Agent server starting on ${host}:${port}`);
-console.log(`  Health check: http://localhost:${port}/health`);
-console.log(`  Inngest endpoint: http://localhost:${port}/api/inngest`);
-console.log(`  Thread management: http://localhost:${port}/threads`);
-console.log(`  Chat endpoint: http://localhost:${port}/chat`);
-console.log(`  Realtime token: http://localhost:${port}/realtime/token`);
+// Async startup to ensure schema exists before accepting requests
+async function startServer() {
+  try {
+    // Ensure database schema exists (idempotent - safe to run every startup)
+    await ensureSchema();
 
-serveHono({
-  fetch: app.fetch,
-  port,
-  hostname: host,
-});
+    console.log(`Agent server starting on ${host}:${port}`);
+    console.log(`  Health check: http://localhost:${port}/health`);
+    console.log(`  Inngest endpoint: http://localhost:${port}/api/inngest`);
+    console.log(`  Thread management: http://localhost:${port}/threads`);
+    console.log(`  Chat endpoint: http://localhost:${port}/chat`);
+    console.log(`  Realtime token: http://localhost:${port}/realtime/token`);
+
+    serveHono({
+      fetch: app.fetch,
+      port,
+      hostname: host,
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+startServer();
 
 export default app;
