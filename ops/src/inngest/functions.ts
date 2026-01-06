@@ -143,9 +143,12 @@ export const agentChat = inngest.createFunction(
       });
 
       // Publish run.complete event to notify dashboard
-      publishEvent({
-        type: 'run.complete',
-        runId,
+      // Using step.run to ensure the event is published before function returns
+      await step.run('publish-run-complete', async () => {
+        publishEvent({
+          type: 'run.complete',
+          runId,
+        });
       });
 
       return {
@@ -155,10 +158,13 @@ export const agentChat = inngest.createFunction(
       };
     } catch (error) {
       // Publish run.error event to notify dashboard
-      publishEvent({
-        type: 'run.error',
-        runId,
-        error: error instanceof Error ? error.message : 'Unknown error',
+      // Using step.run to ensure the event is published before function returns
+      await step.run('publish-run-error', async () => {
+        publishEvent({
+          type: 'run.error',
+          runId,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
       });
 
       // Re-throw to let Inngest handle retries
