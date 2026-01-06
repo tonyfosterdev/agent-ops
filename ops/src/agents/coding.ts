@@ -84,11 +84,17 @@ After writing code changes, you MUST restart the affected service to apply them:
 2. Do NOT use shell_command_execute for npm build/restart - use docker_compose_restart instead
 3. Available services: store-api, warehouse-alpha, warehouse-beta, bookstore-ui
 4. The docker_compose_restart tool rebuilds and restarts the service in one step
-5. Wait for restart to complete and verify the service is running
-6. If restart fails, DO NOT immediately retry - investigate the logs first to understand why
 
-Failure Handling:
-- If a service fails to start after restart, read the logs to understand the error
+IMPORTANT - After Successful Restart:
+Once docker_compose_restart returns success, your task is COMPLETE. Do NOT:
+- Run curl commands to verify the fix
+- Make API calls to test the endpoint
+- Execute any "confirmation" or "verification" steps
+- Run additional shell commands to check if it worked
+Simply call complete_task with a summary of the fix and the successful restart.
+
+Failure Handling (only if restart fails):
+- If docker_compose_restart fails, read the logs to understand the error
 - Common issues: TypeScript compilation errors, missing dependencies, syntax errors
 - Fix the underlying issue before attempting another restart
 - Do not get stuck in a restart loop - investigate first
@@ -98,8 +104,7 @@ Guidelines:
 2. Search for related code to understand the full context
 3. Explain your reasoning before proposing changes
 4. When executing commands, provide clear reasons for why they're needed
-5. Test your changes when possible (run tests, type-check, etc.)
-6. After code changes, restart the affected service to apply them
+5. After code changes, restart the affected service using docker_compose_restart
 ${findingsContext}
 
 When you have completed your task:
