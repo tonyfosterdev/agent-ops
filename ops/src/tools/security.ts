@@ -151,3 +151,82 @@ export function validatePath(requestedPath: string): PathValidationResult {
 export function getWorkspaceRoot(): string {
   return WORKSPACE_ROOT;
 }
+
+/**
+ * Allowed Docker Compose services that can be restarted.
+ *
+ * This allowlist provides defense-in-depth alongside HITL approval.
+ * Only services in this list can be restarted by the agent.
+ */
+export const ALLOWED_SERVICES = [
+  'store-api',
+  'warehouse-alpha',
+  'warehouse-beta',
+  'bookstore-ui',
+] as const;
+
+export type AllowedService = (typeof ALLOWED_SERVICES)[number];
+
+/**
+ * Docker Compose file path.
+ * Defaults to docker-compose.yaml in workspace root but can be overridden
+ * via COMPOSE_FILE env var (matching WORK_DIR pattern).
+ */
+export function getComposeFilePath(): string {
+  return process.env.COMPOSE_FILE || `${WORKSPACE_ROOT}/docker-compose.yaml`;
+}
+
+/**
+ * Docker Compose project name.
+ * When running from inside a container, we need to specify the project name
+ * explicitly since Docker Compose derives it from the directory name.
+ * Defaults to 'agentops' but can be overridden via COMPOSE_PROJECT_NAME env var.
+ */
+export function getComposeProjectName(): string {
+  return process.env.COMPOSE_PROJECT_NAME || 'agentops';
+}
+
+/**
+ * Dangerous patterns in service names (defense-in-depth).
+ * Even though Zod enum validates, we check for injection characters.
+ */
+const SERVICE_INJECTION_PATTERNS = [
+  /[;&|`$(){}[\]<>\\]/, // Shell metacharacters
+  /\s/, // Whitespace (could indicate multiple arguments)
+  /\.\./, // Path traversal
+  /^-/, // Flag injection
+];
+
+/**
+ * Validate a service name for docker compose restart.
+ *
+ * Defense-in-depth validation that checks:
+ * 1. Service is in ALLOWED_SERVICES list
+ * 2. Service name doesn't contain command injection characters
+ *
+ * @param serviceName - The service name to validate
+ * @returns Validation result with reason if invalid
+ */
+export function validateServiceRestart(serviceName: string): ValidationResult {
+  // Check for injection patterns first (defense-in-depth)
+  // This runs even though Zod enum should have validated the service name,
+  // because we want to catch any edge cases or bypass attempts
+  for (const pattern of SERVICE_INJECTION_PATTERNS) {
+    if (pattern.test(serviceName)) {
+      return {
+        valid: false,
+        reason: `Service name contains dangerous characters`,
+      };
+    }
+  }
+
+  // Check allowlist
+  if (!ALLOWED_SERVICES.includes(serviceName as AllowedService)) {
+    return {
+      valid: false,
+      reason: `Service '${serviceName}' not in allowlist. Allowed: ${ALLOWED_SERVICES.join(', ')}`,
+    };
+  }
+
+  return { valid: true };
+}

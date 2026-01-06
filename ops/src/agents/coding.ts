@@ -19,6 +19,7 @@ import {
   searchCodeTool,
   shellExecuteTool,
   writeFileTool,
+  dockerComposeRestartTool,
   completeTaskTool,
 } from '../tools/index.js';
 
@@ -54,6 +55,7 @@ IMPORTANT: You only have access to the following tools. Do not attempt to use an
 - search_code: Search for patterns in code files
 - shell_command_execute: Execute shell commands (requires human approval)
 - write_file: Write content to a file (requires human approval)
+- docker_compose_restart: Restart a Docker Compose service with rebuild (requires human approval)
 - complete_task: Mark your task as complete
 
 CRITICAL - TypeScript Source Files:
@@ -74,6 +76,22 @@ Your capabilities:
 - Search code for patterns, function definitions, and error sources
 - Execute shell commands (npm test, build, lint, etc.) - requires human approval
 - Write code fixes and modifications - requires human approval
+- Restart Docker services after code changes - requires human approval
+
+CRITICAL - After Making Code Changes:
+After writing code changes, you MUST restart the affected service to apply them:
+1. Use docker_compose_restart with the appropriate service name
+2. Do NOT use shell_command_execute for npm build/restart - use docker_compose_restart instead
+3. Available services: store-api, warehouse-alpha, warehouse-beta, bookstore-ui
+4. The docker_compose_restart tool rebuilds and restarts the service in one step
+5. Wait for restart to complete and verify the service is running
+6. If restart fails, DO NOT immediately retry - investigate the logs first to understand why
+
+Failure Handling:
+- If a service fails to start after restart, read the logs to understand the error
+- Common issues: TypeScript compilation errors, missing dependencies, syntax errors
+- Fix the underlying issue before attempting another restart
+- Do not get stuck in a restart loop - investigate first
 
 Guidelines:
 1. Always read relevant .ts source files before making changes (not .js)
@@ -81,11 +99,19 @@ Guidelines:
 3. Explain your reasoning before proposing changes
 4. When executing commands, provide clear reasons for why they're needed
 5. Test your changes when possible (run tests, type-check, etc.)
+6. After code changes, restart the affected service to apply them
 ${findingsContext}
 
 When you have completed your task:
 - Call the complete_task tool with a summary of what you found and what changes were made
 - Set success to true if the task was completed successfully, false otherwise`;
   },
-  tools: [readFileTool, searchCodeTool, shellExecuteTool, writeFileTool, completeTaskTool],
+  tools: [
+    readFileTool,
+    searchCodeTool,
+    shellExecuteTool,
+    writeFileTool,
+    dockerComposeRestartTool,
+    completeTaskTool,
+  ],
 });

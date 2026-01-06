@@ -36,6 +36,13 @@ export {
   writeToolMetadata,
 } from './write-tools.js';
 
+// Docker Compose tools (HITL required)
+export {
+  dockerComposeRestartTool,
+  dockerTools,
+  dockerToolMetadata,
+} from './docker-tools.js';
+
 // Loki log query tools (read-only, no HITL)
 export {
   lokiQueryTool,
@@ -55,16 +62,21 @@ export {
 export {
   validateCommand,
   validatePath,
+  validateServiceRestart,
   getWorkspaceRoot,
+  getComposeFilePath,
   ALLOWED_COMMANDS,
+  ALLOWED_SERVICES,
   type ValidationResult,
   type PathValidationResult,
+  type AllowedService,
 } from './security.js';
 
 // Import for aggregation
 import { fileTools as _fileTools } from './file-tools.js';
 import { shellTools as _shellTools, shellToolMetadata as _shellMeta } from './shell-tools.js';
 import { writeTools as _writeTools, writeToolMetadata as _writeMeta } from './write-tools.js';
+import { dockerTools as _dockerTools, dockerToolMetadata as _dockerMeta } from './docker-tools.js';
 import { lokiTools as _lokiTools } from './loki-tools.js';
 import { stateTools as _stateTools } from './state-tools.js';
 
@@ -96,6 +108,8 @@ export const dangerousTools = [
   ..._shellTools,
   // File writing
   ..._writeTools,
+  // Docker operations
+  ..._dockerTools,
 ];
 
 /**
@@ -120,6 +134,7 @@ export const allTools = [...standardTools, ...dangerousTools];
 export const dangerousToolMetadata = {
   ..._shellMeta,
   ..._writeMeta,
+  ..._dockerMeta,
 };
 
 /**
