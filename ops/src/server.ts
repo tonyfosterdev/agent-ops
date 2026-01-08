@@ -247,11 +247,16 @@ app.post('/api/realtime/token', async (c) => {
 app.post('/api/approve-tool', async (c) => {
   try {
     const body = await c.req.json();
-    const { toolCallId, resolution, reason, userId } = body as {
+    // Support both formats:
+    // - @inngest/use-agent format: { action: 'approve'|'deny', toolCallId, threadId, reason }
+    // - Legacy format: { resolution: 'approved'|'denied', toolCallId, userId, reason }
+    const { toolCallId, action, resolution, reason, userId, threadId } = body as {
       toolCallId: string;
-      resolution: 'approved' | 'denied';
+      action?: 'approve' | 'deny';
+      resolution?: 'approved' | 'denied';
       reason?: string;
-      userId: string;
+      userId?: string;
+      threadId?: string;
     };
 
     if (!toolCallId) {
@@ -260,11 +265,23 @@ app.post('/api/approve-tool', async (c) => {
     if (!isValidUUID(toolCallId)) {
       return c.json({ error: 'toolCallId must be a valid UUID' }, 400);
     }
-    if (!resolution || !['approved', 'denied'].includes(resolution)) {
-      return c.json({ error: 'resolution must be "approved" or "denied"' }, 400);
-    }
-    if (!userId) {
-      return c.json({ error: 'userId is required' }, 400);
+
+    // Determine approval status from either action or resolution field
+    let approved: boolean;
+    if (action) {
+      // @inngest/use-agent format
+      if (!['approve', 'deny'].includes(action)) {
+        return c.json({ error: 'action must be "approve" or "deny"' }, 400);
+      }
+      approved = action === 'approve';
+    } else if (resolution) {
+      // Legacy format
+      if (!['approved', 'denied'].includes(resolution)) {
+        return c.json({ error: 'resolution must be "approved" or "denied"' }, 400);
+      }
+      approved = resolution === 'approved';
+    } else {
+      return c.json({ error: 'Either action or resolution is required' }, 400);
     }
 
     // Send approval event to Inngest
@@ -272,8 +289,10 @@ app.post('/api/approve-tool', async (c) => {
       name: 'agentops/tool.approval',
       data: {
         toolCallId,
-        approved: resolution === 'approved',
+        approved,
         feedback: reason,
+        threadId,
+        userId: userId || 'anonymous',
       },
     });
 

@@ -115,18 +115,25 @@ function ToolCallPartRenderer({
   onDeny: (toolCallId: string, reason: string) => void;
 }) {
   // The part has: toolCallId, toolName, state, input, output, error
+  // For HITL-enabled parts, we also have hitlRequestId attached by Chat.tsx
   const toolCallId = part.toolCallId;
   const toolName = part.toolName;
   const state = part.state;
   const input = part.input as Record<string, unknown> | undefined;
 
+  // Get the HITL request ID if present (attached by Chat.tsx merge logic)
+  // This is the ID to use for approvals - it's the UUID our tool handlers generate
+  // which is different from the AgentKit-generated toolCallId
+  const hitlRequestId = (part as ToolCallPart & { hitlRequestId?: string }).hitlRequestId;
+  const approvalId = hitlRequestId || toolCallId;
+
   // If awaiting approval, show approval UI
   if (state === 'awaiting-approval') {
     return (
       <ToolApproval
-        tool={{ id: toolCallId, name: String(toolName), args: input ?? {} }}
-        onApprove={() => onApprove(toolCallId)}
-        onDeny={(reason) => onDeny(toolCallId, reason)}
+        tool={{ id: approvalId, name: String(toolName), args: input ?? {} }}
+        onApprove={() => onApprove(approvalId)}
+        onDeny={(reason) => onDeny(approvalId, reason)}
       />
     );
   }
