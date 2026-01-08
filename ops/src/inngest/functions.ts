@@ -15,6 +15,20 @@
  * All events (run.started, text.delta, tool-call, etc.) are automatically
  * published to the realtime channel for the useAgents hook to consume.
  *
+ * ## HITL Integration
+ *
+ * When a tool requires approval, the flow is:
+ *
+ * 1. Tool generates unique toolCallId (durably via step.run)
+ * 2. Tool publishes hitl.requested event via the bound publish function
+ * 3. Dashboard shows approval UI with approve/deny buttons
+ * 4. Tool waits via step.waitForEvent('agentops/tool.approval')
+ * 5. User clicks approve/deny -> server sends tool.approval event
+ * 6. waitForEvent resolves, tool continues or returns rejection
+ *
+ * The publish function is injected into the network factory, which passes
+ * it to agent factories, which pass it to tool factories.
+ *
  * ## History Management
  *
  * History is managed automatically by AgentKit's HistoryConfig in network.ts:
@@ -22,32 +36,13 @@
  * - get: Loads conversation history from database
  * - appendUserMessage: Saves user message at start of run
  * - appendResults: Saves agent results after run completes
- *
- * ## HITL Integration
- *
- * When a tool requires approval, it uses:
- *
- * ```typescript
- * await step.waitForEvent('agentops/tool.approval', {
- *   if: `async.data.toolCallId == "${toolCallId}"`,
- *   timeout: '4h',
- * });
- * ```
- *
- * The dashboard sends approval events via the Inngest client:
- *
- * ```typescript
- * await inngest.send({
- *   name: 'agentops/tool.approval',
- *   data: { toolCallId, approved: true },
- * });
- * ```
  */
 
-import { createState } from '@inngest/agent-kit';
+import { createState, type AgentMessageChunk } from '@inngest/agent-kit';
 import { inngest } from '../inngest.js';
-import { agentNetwork } from '../network.js';
+import { createAgentNetwork } from '../network.js';
 import { AGENT_STREAM_TOPIC } from './realtime.js';
+import type { StreamingPublishFn } from '../tools/types.js';
 
 /**
  * Main chat function that runs the agent network.
@@ -81,6 +76,37 @@ export const agentChat = inngest.createFunction(
     // Use channelKey if provided, otherwise fall back to userId
     const subscriptionKey = channelKey || userId;
 
+    // Build channel name for realtime publishing
+    const channelName = `user:${subscriptionKey}`;
+
+    // Sequence counter for event ordering
+    let sequenceNumber = 0;
+
+    /**
+     * Create bound publish function for tools.
+     *
+     * This wrapper adds the auto-generated fields (timestamp, sequenceNumber, id)
+     * that are omitted from the StreamingPublishFn type. It also handles
+     * publishing to the correct realtime channel.
+     */
+    const boundPublish: StreamingPublishFn = async (chunk) => {
+      sequenceNumber += 1;
+      await publish({
+        channel: channelName,
+        topic: AGENT_STREAM_TOPIC,
+        data: {
+          ...chunk,
+          timestamp: Date.now(),
+          sequenceNumber,
+          id: `${chunk.event}-${Date.now()}-${sequenceNumber}`,
+        },
+      });
+    };
+
+    // Create network with publish function injected
+    // This flows down to agents and tools for HITL events
+    const agentNetwork = createAgentNetwork({ publish: boundPublish });
+
     // Create state with userId and optional threadId for history config to use
     // AgentKit's history.createThread handles thread creation/lookup
     const runState = createState({
@@ -88,9 +114,6 @@ export const agentChat = inngest.createFunction(
       threadId, // Pass through - AgentKit handles creation if missing
       userId,
     });
-
-    // Build channel name for realtime publishing
-    const channelName = `user:${subscriptionKey}`;
 
     // Run the agent network with streaming enabled
     // AgentKit now handles:
@@ -101,12 +124,16 @@ export const agentChat = inngest.createFunction(
     const networkRun = await agentNetwork.run(userMessage.content, {
       state: runState,
       streaming: {
-        publish: async (chunk) => {
+        publish: async (chunk: AgentMessageChunk) => {
+          sequenceNumber += 1;
           // Publish to the user's realtime channel
           await publish({
             channel: channelName,
             topic: AGENT_STREAM_TOPIC,
-            data: chunk,
+            data: {
+              ...chunk,
+              sequenceNumber,
+            },
           });
         },
       },

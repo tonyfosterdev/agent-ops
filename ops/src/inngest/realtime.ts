@@ -1,144 +1,66 @@
 /**
- * Inngest Realtime Channel and Topic Definitions.
+ * Inngest Realtime Channel Definition for useAgents.
  *
- * Defines the channel structure for streaming agent events to the dashboard.
- * Each conversation thread gets its own channel, scoped by threadId.
+ * Defines the channel structure for streaming agent events to the dashboard
+ * using @inngest/use-agent's expected format.
  *
  * ## Channel Structure
  *
- * - Channel: `thread:{threadId}` - One channel per conversation thread
- * - Topic: `agent_stream` - All agent events flow through this topic
+ * - Channel: `user:${userId}` - One channel per user
+ * - Topic: `agent_stream` - All AgentKit streaming events
  *
- * ## Event Types
- *
- * Events published to the stream:
- * - `run.started` - Agent run begins
- * - `tool.call` - Agent invokes a tool (includes HITL info if approval needed)
- * - `tool.result` - Tool execution completed
- * - `run.complete` - Agent run finished successfully
- * - `run.error` - Agent run failed
- *
- * ## Future Event Types (Deferred)
- *
- * The following event type is reserved for future implementation:
- * - `text.delta` - Token-level streaming of assistant responses
- *
- * Token-level streaming requires AgentKit's onToken callback support which is
- * not yet available. When implemented, text.delta events will allow real-time
- * display of assistant responses as they are generated, rather than waiting
- * for the complete response.
+ * AgentKit automatically publishes these event types via streaming.publish:
+ * - `run.started`, `run.completed`, `run.failed`
+ * - `part.created`, `part.completed` (text, tool-call, tool-output)
+ * - `text.delta` (streaming text chunks)
+ * - `hitl.requested`, `hitl.resolved` (approval flow)
  *
  * ## Usage
  *
- * Server (publishing):
+ * Server (publish via streaming):
  * ```typescript
- * const channel = getAgentChannel(threadId);
- * publish({ channel, topic: 'agent_stream', data: { type: 'run.started', runId } });
- * ```
- *
- * Dashboard (subscribing):
- * ```typescript
- * const token = await getSubscriptionToken(inngest, {
- *   channel: getAgentChannel(threadId),
- *   topics: ['agent_stream'],
+ * await agentNetwork.run(message, {
+ *   state: runState,
+ *   streaming: {
+ *     publish: async (chunk) => {
+ *       await publish(userChannel(userId).agent_stream(chunk));
+ *     },
+ *   },
  * });
  * ```
+ *
+ * Dashboard (subscribing via useAgents):
+ * The useAgents hook automatically handles subscription via WebSocket token.
  */
 
-/**
- * Event types that can be published to the agent stream.
- *
- * These events are consumed by the dashboard to update the UI in real-time.
- */
-export type AgentStreamEvent =
-  | {
-      type: 'run.started';
-      runId: string;
-      threadId: string;
-    }
-  | {
-      type: 'tool.call';
-      toolName: string;
-      toolCallId: string;
-      args: unknown;
-      /** Whether this tool requires human approval before execution */
-      requiresApproval: boolean;
-      /** ID used to match approval events (same as toolCallId for HITL tools) */
-      approvalRequestId?: string;
-      /** Human-readable reason why this tool needs to run */
-      reason?: string;
-      /** Name of the agent that invoked this tool */
-      agentName?: string;
-    }
-  | {
-      type: 'tool.result';
-      toolCallId: string;
-      result: unknown;
-      isError: boolean;
-      /** Feedback provided when tool was rejected */
-      rejectionFeedback?: string;
-    }
-  | {
-      type: 'run.complete';
-      runId: string;
-    }
-  | {
-      type: 'run.error';
-      runId: string;
-      error: string;
-    };
+import { channel, topic } from '@inngest/realtime';
+import { z } from 'zod';
 
 /**
- * Create a channel name for a specific thread.
- *
- * Each conversation thread has its own channel to isolate streaming events.
- * This ensures users only receive events for threads they have access to.
- *
- * @param threadId - UUID of the conversation thread
- * @returns Channel name in format `thread:{threadId}`
+ * Schema for AgentKit streaming chunks.
+ * This matches the AgentMessageChunk format from @inngest/agent-kit.
  */
-export function getAgentChannel(threadId: string): string {
-  return `thread:${threadId}`;
-}
+const AgentMessageChunkSchema = z.object({
+  event: z.string(),
+  data: z.unknown(),
+  timestamp: z.number().optional(),
+  sequenceNumber: z.number().optional(),
+  id: z.string().optional(),
+});
+
+/**
+ * Channel factory for user-scoped streaming.
+ *
+ * Creates channels in the format `user:${userId}` which the useAgents hook
+ * subscribes to via the WebSocket token from /api/realtime/token.
+ *
+ * @param userId - User identifier for channel scoping
+ * @returns Channel with agent_stream topic
+ */
+export const userChannel = channel((userId: string) => `user:${userId}`)
+  .addTopic(topic('agent_stream').schema(AgentMessageChunkSchema));
 
 /**
  * The topic name for agent streaming events.
- *
- * All agent events (tool calls, results, completions) flow through
- * this single topic within each thread's channel.
  */
 export const AGENT_STREAM_TOPIC = 'agent_stream';
-
-/**
- * Get channel configuration for agent streaming.
- *
- * Creates thread-scoped channel reference for use with getSubscriptionToken().
- * The channel is just a string, and topics specify what events to subscribe to.
- *
- * @param threadId - Thread UUID to scope the channel
- * @returns Channel string
- */
-export function agentChannel({ threadId }: { threadId: string }): string {
-  return getAgentChannel(threadId);
-}
-
-/**
- * Type-safe publish helper for agent stream events.
- *
- * Ensures events are correctly typed when publishing to the stream.
- *
- * @param publish - The publish function from Inngest function context
- * @param threadId - Thread to publish to
- * @param event - The event to publish
- */
-export function publishToThread(
-  publish: (opts: { channel: string; topic: string; data: AgentStreamEvent }) => void,
-  threadId: string,
-  event: AgentStreamEvent
-): void {
-  publish({
-    channel: getAgentChannel(threadId),
-    topic: AGENT_STREAM_TOPIC,
-    data: event,
-  });
-}

@@ -1,41 +1,46 @@
 /**
  * MessageList Component - Renders chat messages with proper formatting.
  *
- * Handles different message types:
+ * Handles different message types from @inngest/use-agent:
  * - User messages (right-aligned, blue)
  * - Assistant messages (left-aligned, gray)
- * - System messages (centered, muted)
- * - Tool calls and results within messages
+ * - Tool calls and results within message parts
+ * - HITL approval parts for dangerous tools
  *
  * ## Features
  * - Real-time streaming message updates
  * - Auto-scroll to bottom on new messages
  * - Markdown-like code block rendering
- * - Tool call visualization
+ * - Tool call visualization with approval UI
  * - Typing indicator during loading
  */
 
 import { useEffect, useRef } from 'react';
-import type { StreamMessage, StreamMessagePart, PendingApproval } from '@/hooks/types';
+import type { ConversationMessage, MessagePart, TextUIPart, HitlUIPart } from '@inngest/use-agent';
 import { ToolApproval } from './ToolApproval';
+import { WaitingForApprovalIndicator } from './StatusMessage';
+
+// Type helpers for working with the generic MessagePart type
+type AnyPart = MessagePart;
+type ToolCallPart = Extract<AnyPart, { type: 'tool-call' }>;
 
 export interface MessageListProps {
-  /** Messages to display */
-  messages: StreamMessage[];
+  /** Messages from useAgents hook */
+  messages: ConversationMessage[];
   /** Whether agent is currently processing */
   isLoading: boolean;
-  /** Pending tool approvals */
-  pendingApprovals: PendingApproval[];
+  /** Whether agent is waiting for human approval */
+  isWaitingForApproval: boolean;
   /** Callback for tool approval */
-  onApprove: (runId: string, toolCallId: string) => void;
+  onApprove: (toolCallId: string) => void;
   /** Callback for tool rejection */
-  onDeny: (runId: string, toolCallId: string, reason: string) => void;
+  onDeny: (toolCallId: string, reason: string) => void;
 }
 
 /**
  * Render a text part with basic markdown support.
  */
-function TextPart({ content }: { content: string }) {
+function TextPartRenderer({ content }: { content: string }) {
   // Simple code block detection
   const parts = content.split(/(```[\s\S]*?```)/g);
 
@@ -75,7 +80,7 @@ function TextPart({ content }: { content: string }) {
                 return (
                   <code
                     key={j}
-                    className="bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                    className="bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-1.5 py-0.5 rounded text-sm font-mono"
                   >
                     {codePart.slice(1, -1)}
                   </code>
@@ -97,49 +102,52 @@ function TextPart({ content }: { content: string }) {
 }
 
 /**
- * Render a tool call part.
+ * Render a tool call part with status.
+ * The ToolCallUIPart uses 'state' instead of 'status' and has different shape.
  */
-function ToolCallPart({
+function ToolCallPartRenderer({
   part,
-  pendingApproval,
   onApprove,
   onDeny,
 }: {
-  part: Extract<StreamMessagePart, { type: 'tool-call' }>;
-  pendingApproval?: PendingApproval;
-  onApprove: (runId: string, toolCallId: string) => void;
-  onDeny: (runId: string, toolCallId: string, reason: string) => void;
+  part: ToolCallPart;
+  onApprove: (toolCallId: string) => void;
+  onDeny: (toolCallId: string, reason: string) => void;
 }) {
-  // If this tool call requires approval and is pending, show approval UI
-  if (pendingApproval) {
+  // The part has: toolCallId, toolName, state, input, output, error
+  const toolCallId = part.toolCallId;
+  const toolName = part.toolName;
+  const state = part.state;
+  const input = part.input as Record<string, unknown> | undefined;
+
+  // If awaiting approval, show approval UI
+  if (state === 'awaiting-approval') {
     return (
       <ToolApproval
-        tool={{ id: part.id, name: part.name, args: part.args }}
-        runId={pendingApproval.runId}
-        agentName={pendingApproval.agentName}
-        reason={part.reason}
-        onApprove={() => onApprove(pendingApproval.runId, part.id)}
-        onDeny={(reason) => onDeny(pendingApproval.runId, part.id, reason)}
+        tool={{ id: toolCallId, name: String(toolName), args: input ?? {} }}
+        onApprove={() => onApprove(toolCallId)}
+        onDeny={(reason) => onDeny(toolCallId, reason)}
       />
     );
   }
 
-  // Otherwise show a completed or non-approval tool call
-  const statusColors = {
-    pending: 'bg-yellow-50 border-yellow-200',
-    approved: 'bg-green-50 border-green-200',
-    rejected: 'bg-red-50 border-red-200',
-    completed: 'bg-green-50 border-green-200',
+  // Map state to colors
+  const stateColors: Record<string, string> = {
+    'input-streaming': 'bg-yellow-50 dark:bg-yellow-900/30 border-yellow-200 dark:border-yellow-800',
+    'input-available': 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800',
+    'awaiting-approval': 'bg-orange-50 dark:bg-orange-900/30 border-orange-200 dark:border-orange-800',
+    'executing': 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800',
+    'output-available': 'bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800',
   };
 
-  const status = part.status || 'completed';
-  const colors = statusColors[status];
+  const colors = stateColors[state] || stateColors['output-available'];
+  const isComplete = state === 'output-available';
 
   return (
     <div className={`${colors} border rounded-lg p-3 my-2 text-sm`}>
       <div className="flex items-center gap-2 mb-2">
         <svg
-          className="w-4 h-4 text-gray-500"
+          className="w-4 h-4 text-gray-500 dark:text-gray-400"
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
@@ -157,61 +165,84 @@ function ToolCallPart({
             d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
           />
         </svg>
-        <span className="font-mono font-medium">{part.name}</span>
-        {status !== 'completed' && (
+        <span className="font-mono font-medium text-gray-900 dark:text-gray-100">{String(toolName)}</span>
+        {!isComplete && (
           <span
             className={`text-xs px-2 py-0.5 rounded ${
-              status === 'pending' ? 'bg-yellow-200 text-yellow-800' : 'bg-red-200 text-red-800'
+              state === 'input-streaming' || state === 'executing'
+                ? 'bg-yellow-200 dark:bg-yellow-800 text-yellow-800 dark:text-yellow-200'
+                : 'bg-blue-200 dark:bg-blue-800 text-blue-800 dark:text-blue-200'
             }`}
           >
-            {status}
+            {state}
           </span>
         )}
       </div>
-      {part.reason && (
-        <p className="text-xs text-gray-600 mb-2 italic">{part.reason}</p>
+      {input && (
+        <pre className="bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 rounded p-2 overflow-x-auto text-xs font-mono">
+          {JSON.stringify(input, null, 2)}
+        </pre>
       )}
-      <pre className="bg-gray-100 rounded p-2 overflow-x-auto text-xs font-mono">
-        {JSON.stringify(part.args, null, 2)}
-      </pre>
+      {/* Show output if available */}
+      {state === 'output-available' && part.output !== undefined && (
+        <div className="mt-2 bg-gray-900 dark:bg-gray-950 text-gray-100 rounded p-2 overflow-x-auto text-xs font-mono">
+          {typeof part.output === 'string'
+            ? String(part.output)
+            : JSON.stringify(part.output, null, 2)}
+        </div>
+      )}
     </div>
   );
 }
 
 /**
- * Render a tool result part.
+ * Render a HITL (Human-in-the-Loop) part for tool approvals.
+ * HitlUIPart has: id, toolCalls[], status, expiresAt?, resolvedBy?, resolvedAt?, metadata?
  */
-function ToolResultPart({
+function HitlPartRenderer({
   part,
+  onApprove,
+  onDeny,
 }: {
-  part: Extract<StreamMessagePart, { type: 'tool-result' }>;
+  part: HitlUIPart;
+  onApprove: (toolCallId: string) => void;
+  onDeny: (toolCallId: string, reason: string) => void;
 }) {
-  const isError = part.isError;
+  const { id, toolCalls, status, metadata } = part;
+  const reason = metadata?.reason;
 
+  // Show approval UI if pending
+  if (status === 'pending') {
+    // For each tool call in the HITL request, show approval UI
+    // Use the HITL part id as the tool call id for approval
+    const firstTool = toolCalls[0];
+    if (firstTool) {
+      return (
+        <ToolApproval
+          tool={{ id, name: firstTool.toolName, args: (firstTool.toolInput ?? {}) as Record<string, unknown> }}
+          reason={reason}
+          onApprove={() => onApprove(id)}
+          onDeny={(denyReason) => onDeny(id, denyReason)}
+        />
+      );
+    }
+  }
+
+  // Show resolution status
+  const isApproved = status === 'approved';
+  const toolNames = toolCalls.map((tc) => tc.toolName).join(', ');
   return (
     <div
       className={`${
-        isError ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'
+        isApproved
+          ? 'bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800'
+          : 'bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800'
       } border rounded-lg p-3 my-2 text-sm`}
     >
-      <div className="flex items-center gap-2 mb-2">
-        {isError ? (
+      <div className="flex items-center gap-2">
+        {isApproved ? (
           <svg
-            className="w-4 h-4 text-red-500"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-            />
-          </svg>
-        ) : (
-          <svg
-            className="w-4 h-4 text-green-500"
+            className="w-4 h-4 text-green-500 dark:text-green-400"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -223,21 +254,70 @@ function ToolResultPart({
               d="M5 13l4 4L19 7"
             />
           </svg>
+        ) : (
+          <svg
+            className="w-4 h-4 text-red-500 dark:text-red-400"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M6 18L18 6M6 6l12 12"
+            />
+          </svg>
         )}
-        <span className="font-medium">{isError ? 'Error' : 'Result'}</span>
+        <span className="font-medium text-gray-900 dark:text-gray-100">
+          {toolNames} - {isApproved ? 'Approved' : 'Denied'}
+        </span>
       </div>
-      {part.rejectionFeedback && (
-        <p className="text-xs text-red-600 mb-2 italic">
-          Rejected: {part.rejectionFeedback}
-        </p>
-      )}
-      <pre className="bg-gray-900 text-gray-100 rounded p-2 overflow-x-auto text-xs font-mono">
-        {typeof part.result === 'string'
-          ? part.result
-          : JSON.stringify(part.result, null, 2)}
-      </pre>
     </div>
   );
+}
+
+/**
+ * Render a single part based on its type.
+ */
+function PartRenderer({
+  part,
+  onApprove,
+  onDeny,
+}: {
+  part: AnyPart;
+  onApprove: (toolCallId: string) => void;
+  onDeny: (toolCallId: string, reason: string) => void;
+}) {
+  switch (part.type) {
+    case 'text': {
+      const textPart = part as TextUIPart;
+      return <TextPartRenderer content={textPart.content} />;
+    }
+    case 'tool-call': {
+      const toolPart = part as ToolCallPart;
+      return (
+        <ToolCallPartRenderer
+          part={toolPart}
+          onApprove={onApprove}
+          onDeny={onDeny}
+        />
+      );
+    }
+    case 'hitl': {
+      const hitlPart = part as HitlUIPart;
+      return (
+        <HitlPartRenderer
+          part={hitlPart}
+          onApprove={onApprove}
+          onDeny={onDeny}
+        />
+      );
+    }
+    default:
+      // Handle other part types gracefully
+      return null;
+  }
 }
 
 /**
@@ -245,35 +325,20 @@ function ToolResultPart({
  */
 function MessageItem({
   message,
-  pendingApprovals,
   onApprove,
   onDeny,
 }: {
-  message: StreamMessage;
-  pendingApprovals: PendingApproval[];
-  onApprove: (runId: string, toolCallId: string) => void;
-  onDeny: (runId: string, toolCallId: string, reason: string) => void;
+  message: ConversationMessage;
+  onApprove: (toolCallId: string) => void;
+  onDeny: (toolCallId: string, reason: string) => void;
 }) {
   const isUser = message.role === 'user';
-  const isSystem = message.role === 'system';
 
-  if (isSystem) {
-    // Check if this is an error message
-    const isError = message.content.toLowerCase().startsWith('error:');
-    return (
-      <div className="flex justify-center my-4">
-        <div
-          className={`${
-            isError
-              ? 'bg-red-100 text-red-700 border border-red-200'
-              : 'bg-gray-100 text-gray-500'
-          } text-sm px-4 py-2 rounded-full`}
-        >
-          {message.content}
-        </div>
-      </div>
-    );
-  }
+  // Get text content from message
+  const textContent = message.parts
+    ?.filter((p): p is TextUIPart => p.type === 'text')
+    .map((p) => p.content)
+    .join('') ?? '';
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}>
@@ -281,57 +346,34 @@ function MessageItem({
         className={`max-w-[80%] ${
           isUser
             ? 'bg-indigo-600 text-white rounded-2xl rounded-br-md'
-            : 'bg-gray-100 text-gray-900 rounded-2xl rounded-bl-md'
+            : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-2xl rounded-bl-md'
         } px-4 py-3`}
       >
-        {/* Agent name badge for assistant messages */}
-        {!isUser && message.agentName && (
-          <div className="text-xs text-indigo-600 font-medium mb-1">
-            {message.agentName}
-          </div>
-        )}
-
-        {/* Render parts if available, otherwise content */}
+        {/* Render parts if available */}
         {message.parts && message.parts.length > 0 ? (
-          message.parts.map((part, i) => {
-            if (part.type === 'text') {
-              return (
-                <div key={i}>
-                  <TextPart content={part.content} />
-                </div>
-              );
-            }
-            if (part.type === 'tool-call') {
-              const pending = pendingApprovals.find(
-                (a) => a.toolCallId === part.id
-              );
-              return (
-                <ToolCallPart
-                  key={i}
-                  part={part}
-                  pendingApproval={pending}
-                  onApprove={onApprove}
-                  onDeny={onDeny}
-                />
-              );
-            }
-            if (part.type === 'tool-result') {
-              return <ToolResultPart key={i} part={part} />;
-            }
-            return null;
-          })
+          message.parts.map((part, i) => (
+            <PartRenderer
+              key={i}
+              part={part}
+              onApprove={onApprove}
+              onDeny={onDeny}
+            />
+          ))
         ) : (
-          <TextPart content={message.content} />
+          // Fallback - show nothing if no parts
+          textContent && <TextPartRenderer content={textContent} />
         )}
 
         {/* Timestamp */}
-        <div
-          className={`text-xs mt-2 ${
-            isUser ? 'text-indigo-200' : 'text-gray-400'
-          }`}
-        >
-          {new Date(message.createdAt).toLocaleTimeString()}
-        </div>
+        {message.timestamp && (
+          <div
+            className={`text-xs mt-2 ${
+              isUser ? 'text-indigo-200' : 'text-gray-400 dark:text-gray-500'
+            }`}
+          >
+            {message.timestamp.toLocaleTimeString()}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -343,12 +385,12 @@ function MessageItem({
 function TypingIndicator() {
   return (
     <div className="flex justify-start mb-4">
-      <div className="bg-gray-100 rounded-2xl rounded-bl-md px-4 py-3">
+      <div className="bg-gray-100 dark:bg-gray-800 rounded-2xl rounded-bl-md px-4 py-3">
         <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-500 mr-2">Agent thinking</span>
-          <span className="typing-dot w-2 h-2 bg-gray-400 rounded-full" />
-          <span className="typing-dot w-2 h-2 bg-gray-400 rounded-full" />
-          <span className="typing-dot w-2 h-2 bg-gray-400 rounded-full" />
+          <span className="text-xs text-gray-500 dark:text-gray-400 mr-2">Agent thinking</span>
+          <span className="typing-dot w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full" />
+          <span className="typing-dot w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full" />
+          <span className="typing-dot w-2 h-2 bg-gray-400 dark:bg-gray-500 rounded-full" />
         </div>
       </div>
     </div>
@@ -358,7 +400,7 @@ function TypingIndicator() {
 export function MessageList({
   messages,
   isLoading,
-  pendingApprovals,
+  isWaitingForApproval,
   onApprove,
   onDeny,
 }: MessageListProps) {
@@ -371,10 +413,10 @@ export function MessageList({
 
   if (messages.length === 0 && !isLoading) {
     return (
-      <div className="flex-1 flex items-center justify-center text-gray-400">
+      <div className="flex-1 flex items-center justify-center text-gray-400 dark:text-gray-500">
         <div className="text-center">
           <svg
-            className="w-16 h-16 mx-auto mb-4 text-gray-300"
+            className="w-16 h-16 mx-auto mb-4 text-gray-300 dark:text-gray-600"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -395,18 +437,17 @@ export function MessageList({
 
   return (
     <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
-      {messages.map((message) => (
+      {messages.map((message, i) => (
         <MessageItem
-          key={message.id}
+          key={message.id || i}
           message={message}
-          pendingApprovals={pendingApprovals}
           onApprove={onApprove}
           onDeny={onDeny}
         />
       ))}
-      {/* Only show typing indicator when loading AND no pending approvals */}
-      {/* When waiting for approval, the approval UI is shown instead */}
-      {isLoading && pendingApprovals.length === 0 && <TypingIndicator />}
+      {/* Show appropriate indicator based on state */}
+      {isLoading && !isWaitingForApproval && <TypingIndicator />}
+      {isWaitingForApproval && <WaitingForApprovalIndicator />}
       <div ref={bottomRef} />
     </div>
   );

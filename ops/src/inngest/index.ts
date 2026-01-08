@@ -5,10 +5,4 @@
  */
 
 export { agentChat, inngestFunctions } from './functions.js';
-export {
-  agentChannel,
-  getAgentChannel,
-  publishToThread,
-  AGENT_STREAM_TOPIC,
-  type AgentStreamEvent,
-} from './realtime.js';
+export { userChannel, AGENT_STREAM_TOPIC } from './realtime.js';

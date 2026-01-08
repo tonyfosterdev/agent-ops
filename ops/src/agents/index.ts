@@ -1,24 +1,27 @@
 /**
  * AgentKit agents barrel export.
  *
- * This module exports all available agents for use with AgentKit networks.
+ * This module exports all available agent factories for use with AgentKit networks.
  * Each agent is specialized for a particular domain:
  *
- * - codingAgent: Code analysis, debugging, and repairs
- * - logAnalyzer: Log parsing, pattern detection, and diagnostics
+ * - createCodingAgent: Code analysis, debugging, and repairs (uses dangerous tools)
+ * - createLogAnalyzer: Log parsing, pattern detection, and diagnostics (safe tools only)
  *
- * Note: AgentKit provides getDefaultRoutingAgent() for LLM-based routing,
- * so no "default" agent is needed here. The network uses a hybrid routing
- * approach: code-based rules first, then LLM fallback via getDefaultRoutingAgent().
+ * ## Factory Pattern
+ *
+ * All agents are now created via factory functions that accept a FactoryContext.
+ * This allows the publish function to be injected for HITL events:
+ *
+ * ```typescript
+ * const codingAgent = createCodingAgent({ publish });
+ * const logAnalyzer = createLogAnalyzer({ publish });
+ * ```
+ *
+ * The network uses LLM-only routing for intent classification to ensure
+ * correctness. All initial routing decisions go through Claude 3.5 Haiku.
  */
-export { codingAgent } from './coding.js';
-export { logAnalyzer } from './log-analyzer.js';
+export { createCodingAgent } from './coding.js';
+export { createLogAnalyzer } from './log-analyzer.js';
 
-// Re-export as array for convenient network registration
-import { codingAgent } from './coding.js';
-import { logAnalyzer } from './log-analyzer.js';
-
-/**
- * All available agents for network registration.
- */
-export const agents = [codingAgent, logAnalyzer];
+// Re-export types
+export type { FactoryContext } from '../tools/types.js';

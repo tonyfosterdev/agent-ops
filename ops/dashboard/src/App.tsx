@@ -2,15 +2,17 @@
  * App Component - Root component for AgentOps Dashboard.
  *
  * Sets up the application with:
- * - User context (hardcoded for now, would come from auth)
+ * - AgentProvider for useAgents hook configuration
+ * - Health check for server connectivity
+ * - Theme provider with dark mode support
  * - Chat interface
  *
  * ## Architecture
  *
- * The dashboard uses a simple architecture:
- * - App.tsx: Root component with user context
- * - Chat.tsx: Main chat interface
- * - MessageList.tsx: Message rendering
+ * The dashboard uses @inngest/use-agent for communication:
+ * - AgentProvider: Configures userId and baseUrl for the hook
+ * - Chat.tsx: Main chat interface using useAgents
+ * - MessageList.tsx: Message rendering with ConversationMessage types
  * - ToolApproval.tsx: HITL approval UI
  *
  * ## Future Improvements
@@ -20,9 +22,56 @@
  * - Support multiple concurrent threads
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, createContext, useContext } from 'react';
+import { AgentProvider } from '@inngest/use-agent';
 import { Chat } from '@/components/Chat';
 import { healthCheck } from '@/api/client';
+
+// Theme context
+type Theme = 'light' | 'dark';
+interface ThemeContextType {
+  theme: Theme;
+  toggleTheme: () => void;
+}
+
+const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
+
+export function useTheme() {
+  const context = useContext(ThemeContext);
+  if (!context) {
+    throw new Error('useTheme must be used within ThemeProvider');
+  }
+  return context;
+}
+
+function ThemeProvider({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<Theme>(() => {
+    // Check localStorage, default to dark
+    const stored = localStorage.getItem('theme');
+    return (stored as Theme) || 'dark';
+  });
+
+  useEffect(() => {
+    // Apply theme to document
+    const root = document.documentElement;
+    if (theme === 'dark') {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  };
+
+  return (
+    <ThemeContext.Provider value={{ theme, toggleTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+}
 
 /**
  * Server status indicator.
@@ -45,7 +94,7 @@ function ServerStatus({
   };
 
   return (
-    <div className="flex items-center gap-2 text-sm text-gray-600">
+    <div className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
       <span className={`w-2 h-2 rounded-full ${colors[status]}`} />
       <span>{labels[status]}</span>
     </div>
@@ -57,11 +106,11 @@ function ServerStatus({
  */
 function ConnectionError({ onRetry }: { onRetry: () => void }) {
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-lg p-8 max-w-md w-full text-center">
-        <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-8 max-w-md w-full text-center">
+        <div className="w-16 h-16 bg-red-100 dark:bg-red-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
           <svg
-            className="w-8 h-8 text-red-600"
+            className="w-8 h-8 text-red-600 dark:text-red-400"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -74,10 +123,10 @@ function ConnectionError({ onRetry }: { onRetry: () => void }) {
             />
           </svg>
         </div>
-        <h2 className="text-xl font-semibold text-gray-900 mb-2">
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">
           Cannot Connect to Agent Server
         </h2>
-        <p className="text-gray-600 mb-6">
+        <p className="text-gray-600 dark:text-gray-400 mb-6">
           The agent server is not responding. Please ensure it is running on port
           3200.
         </p>
@@ -88,9 +137,9 @@ function ConnectionError({ onRetry }: { onRetry: () => void }) {
           >
             Retry Connection
           </button>
-          <div className="text-sm text-gray-500">
+          <div className="text-sm text-gray-500 dark:text-gray-400">
             <p>To start the server, run:</p>
-            <code className="bg-gray-100 px-2 py-1 rounded text-xs block mt-1">
+            <code className="bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-2 py-1 rounded text-xs block mt-1">
               cd ops && npm run dev:server
             </code>
           </div>
@@ -105,11 +154,11 @@ function ConnectionError({ onRetry }: { onRetry: () => void }) {
  */
 function LoadingScreen() {
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
       <div className="text-center">
-        <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4">
+        <div className="w-16 h-16 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
           <svg
-            className="w-8 h-8 text-indigo-600 animate-spin"
+            className="w-8 h-8 text-indigo-600 dark:text-indigo-400 animate-spin"
             viewBox="0 0 24 24"
             fill="none"
           >
@@ -128,7 +177,7 @@ function LoadingScreen() {
             />
           </svg>
         </div>
-        <p className="text-gray-600">Connecting to agent server...</p>
+        <p className="text-gray-600 dark:text-gray-400">Connecting to agent server...</p>
       </div>
     </div>
   );
@@ -166,14 +215,31 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Status bar */}
-      <div className="fixed bottom-4 right-4 bg-white rounded-lg shadow-lg px-3 py-2 z-50">
-        <ServerStatus status={serverStatus} />
-      </div>
+    <ThemeProvider>
+      <AgentProvider
+        userId={userId}
+        transport={{
+          api: {
+            sendMessage: '/api/chat',
+            getRealtimeToken: '/api/realtime/token',
+            fetchThreads: '/api/threads',
+            fetchHistory: '/api/threads/{threadId}/history',
+            createThread: '/api/threads',
+            deleteThread: '/api/threads/{threadId}',
+            approveToolCall: '/api/approve-tool',
+          },
+        }}
+      >
+        <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+          {/* Status bar */}
+          <div className="fixed bottom-4 right-4 bg-white dark:bg-gray-800 rounded-lg shadow-lg px-3 py-2 z-50">
+            <ServerStatus status={serverStatus} />
+          </div>
 
-      <Chat userId={userId} />
-    </div>
+          <Chat />
+        </div>
+      </AgentProvider>
+    </ThemeProvider>
   );
 }
 

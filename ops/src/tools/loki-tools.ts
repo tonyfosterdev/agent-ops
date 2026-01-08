@@ -5,6 +5,10 @@
  * enabling investigation of application issues and monitoring.
  * They are read-only and do not require human approval.
  * All network operations are wrapped in step.run() for durability.
+ *
+ * Status Publishing:
+ * Each tool publishes agent.status events to keep users informed
+ * of progress during potentially slow network operations.
  */
 import { createTool } from '@inngest/agent-kit';
 import { z } from 'zod';
@@ -81,6 +85,7 @@ export const lokiQueryTool = createTool({
       .describe('Sort order: "backward" (newest first) or "forward" (oldest first). Default: backward'),
   }),
   handler: async ({ query, limit, start, end, direction }, { step }) => {
+    // AgentKit automatically handles status publishing via streaming.publish
     const queryLogic = async () => {
       try {
         const lokiUrl = config.services.lokiUrl;
@@ -198,6 +203,7 @@ export const lokiLabelsTool = createTool({
       .describe('End time for label discovery (ISO 8601 or "now"). Defaults to now.'),
   }),
   handler: async ({ start, end }, { step }) => {
+    // AgentKit automatically handles status publishing via streaming.publish
     const labelsLogic = async () => {
       try {
         const lokiUrl = config.services.lokiUrl;
@@ -297,6 +303,7 @@ export const lokiLabelValuesTool = createTool({
       .describe('End time (ISO 8601 or "now"). Defaults to now.'),
   }),
   handler: async ({ label, start, end }, { step }) => {
+    // AgentKit automatically handles status publishing via streaming.publish
     const labelValuesLogic = async () => {
       try {
         const lokiUrl = config.services.lokiUrl;

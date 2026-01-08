@@ -5,12 +5,31 @@
  * Tools are organized into categories:
  *
  * - File Tools: Read-only file operations (no HITL required)
- * - Shell Tools: Shell command execution (HITL required)
- * - Write Tools: File writing operations (HITL required)
+ * - Shell Tools: Shell command execution (HITL required) - factory pattern
+ * - Write Tools: File writing operations (HITL required) - factory pattern
+ * - Docker Tools: Docker operations (HITL required) - factory pattern
  * - Loki Tools: Log querying from Grafana Loki (no HITL required)
  * - State Tools: Network state mutation for agent communication (no HITL required)
  * - Security: Validation utilities for defense-in-depth
+ *
+ * ## Factory Pattern
+ *
+ * Dangerous tools (shell, write, docker) use the factory pattern to receive
+ * a publish function for emitting HITL events. Create these tools by passing
+ * a FactoryContext:
+ *
+ * ```typescript
+ * const dangerousTools = [
+ *   ...createShellTools({ publish }),
+ *   ...createWriteTools({ publish }),
+ *   ...createDockerTools({ publish }),
+ * ];
+ * ```
  */
+
+// Shared types for factory pattern
+export type { FactoryContext, StreamingPublishFn } from './types.js';
+export { createHitlRequestedEvent } from './types.js';
 
 // File operation tools (read-only, no HITL)
 export {
@@ -20,26 +39,26 @@ export {
   fileTools,
 } from './file-tools.js';
 
-// Shell execution tools (HITL required)
+// Shell execution tools (HITL required) - factory pattern
 export {
-  shellExecuteTool,
-  shellTools,
+  createShellExecuteTool,
+  createShellTools,
   shellToolMetadata,
   type HitlPendingResult,
 } from './shell-tools.js';
 
-// File writing tools (HITL required)
+// File writing tools (HITL required) - factory pattern
 export {
-  writeFileTool,
-  appendFileTool,
-  writeTools,
+  createWriteFileTool,
+  createAppendFileTool,
+  createWriteTools,
   writeToolMetadata,
 } from './write-tools.js';
 
-// Docker Compose tools (HITL required)
+// Docker Compose tools (HITL required) - factory pattern
 export {
-  dockerComposeRestartTool,
-  dockerTools,
+  createDockerComposeRestartTool,
+  createDockerTools,
   dockerToolMetadata,
 } from './docker-tools.js';
 
@@ -74,11 +93,15 @@ export {
 
 // Import for aggregation
 import { fileTools as _fileTools } from './file-tools.js';
-import { shellTools as _shellTools, shellToolMetadata as _shellMeta } from './shell-tools.js';
-import { writeTools as _writeTools, writeToolMetadata as _writeMeta } from './write-tools.js';
-import { dockerTools as _dockerTools, dockerToolMetadata as _dockerMeta } from './docker-tools.js';
+import { shellToolMetadata as _shellMeta } from './shell-tools.js';
+import { writeToolMetadata as _writeMeta } from './write-tools.js';
+import { dockerToolMetadata as _dockerMeta } from './docker-tools.js';
 import { lokiTools as _lokiTools } from './loki-tools.js';
 import { stateTools as _stateTools } from './state-tools.js';
+import { createShellTools as _createShellTools } from './shell-tools.js';
+import { createWriteTools as _createWriteTools } from './write-tools.js';
+import { createDockerTools as _createDockerTools } from './docker-tools.js';
+import type { FactoryContext } from './types.js';
 
 /**
  * All standard tools (no HITL required).
@@ -98,27 +121,25 @@ export const standardTools = [
 ];
 
 /**
- * All dangerous tools (HITL required).
+ * Create all dangerous tools with publish function injected.
  *
  * These tools modify system state and require explicit human
- * approval before execution.
- */
-export const dangerousTools = [
-  // Shell execution
-  ..._shellTools,
-  // File writing
-  ..._writeTools,
-  // Docker operations
-  ..._dockerTools,
-];
-
-/**
- * All available tools.
+ * approval before execution. The factory pattern ensures each
+ * tool has access to the publish function for HITL events.
  *
- * Includes both standard (safe) and dangerous (HITL) tools.
- * Use with caution - dangerous tools will pause for approval.
+ * @param context - Factory context with publish function
+ * @returns Array of all dangerous tools
  */
-export const allTools = [...standardTools, ...dangerousTools];
+export function createDangerousTools(context: FactoryContext) {
+  return [
+    // Shell execution
+    ..._createShellTools(context),
+    // File writing
+    ..._createWriteTools(context),
+    // Docker operations
+    ..._createDockerTools(context),
+  ];
+}
 
 /**
  * Metadata for dangerous tools.

@@ -1,18 +1,30 @@
 /**
- * Agent Network with LLM-Only Router for AgentOps.
+ * Agent Network Factory with LLM-Only Router for AgentOps.
  *
  * Creates the AgentKit network that orchestrates multiple agents for
  * operations tasks. The network uses LLM classification for all initial
  * routing decisions to ensure correctness.
  *
- * Routing Priority:
+ * ## Factory Pattern
+ *
+ * The network is created via factory function to inject the publish function
+ * into agents that use dangerous tools requiring HITL approval:
+ *
+ * ```typescript
+ * const network = createAgentNetwork({ publish });
+ * ```
+ *
+ * ## Routing Priority
+ *
  * 1. Completion check - Stop if work is done
  * 2. User confirmed handoff - User said "yes" to a handoff suggestion
  * 3. Agent-requested handoff - Explicit delegation via state
  * 4. Sticky behavior - Keep current agent running
  * 5. LLM classification - Route based on intent analysis
  *
- * Design Decision: We use LLM-only routing (no keyword matching) because:
+ * ## Design Decision
+ *
+ * We use LLM-only routing (no keyword matching) because:
  * - Keyword matching has false positives (e.g., "fix the" in "I got an error trying to fix the code")
  * - LLM understands context and nuance that keywords cannot
  * - Correctness is prioritized over latency
@@ -47,11 +59,12 @@
  * userId and optionally threadId in the state.
  */
 
-import { createNetwork, AgentResult, type Agent } from '@inngest/agent-kit';
+import { createNetwork, AgentResult } from '@inngest/agent-kit';
 import { anthropic } from '@inngest/agent-kit';
 import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
-import { codingAgent, logAnalyzer } from './agents/index.js';
+import { createCodingAgent, createLogAnalyzer } from './agents/index.js';
+import type { FactoryContext } from './tools/types.js';
 import { config } from './config.js';
 import { historyAdapter, type StoredMessage } from './db/index.js';
 
@@ -129,166 +142,6 @@ const routingDecisionSchema = z.object({
 type RoutingDecision = z.infer<typeof routingDecisionSchema>;
 
 /**
- * The main agent network for operations tasks.
- *
- * Orchestrates the coding and log-analyzer agents using LLM-only
- * routing for intent classification. All initial routing decisions
- * go through the LLM to ensure correctness.
- */
-export const agentNetwork = createNetwork({
-  name: 'ops-network',
-  agents: [codingAgent, logAnalyzer],
-  defaultModel: anthropic({
-    model: 'claude-sonnet-4-20250514',
-    defaultParameters: {
-      max_tokens: 4096,
-    },
-  }),
-
-  // Limit iterations to prevent runaway execution
-  maxIter: 15,
-
-  /**
-   * History configuration for thread and message persistence.
-   *
-   * Uses client-authoritative threadIds - if the client provides a threadId,
-   * we ensure the thread exists. Otherwise, we create a new one.
-   */
-  history: {
-    /**
-     * Create or ensure thread exists when needed.
-     * Supports both server-generated and client-generated threadIds.
-     */
-    createThread: async ({ state }) => {
-      const userId = state.kv.get('userId') as string;
-      const clientThreadId = state.kv.get('threadId') as string | undefined;
-
-      if (clientThreadId) {
-        // Client-authoritative: ensure thread exists with client-provided ID
-        await historyAdapter.ensureThread(clientThreadId, userId);
-        return { threadId: clientThreadId };
-      }
-
-      // Server-authoritative: create new thread
-      const threadId = await historyAdapter.createThread(userId);
-      return { threadId };
-    },
-
-    /**
-     * Load conversation history from database.
-     * Verifies thread ownership before returning messages.
-     */
-    get: async ({ threadId, state }) => {
-      if (!threadId) return [];
-
-      // Verify thread ownership
-      const userId = state.kv.get('userId') as string;
-      const thread = await historyAdapter.getThread(threadId);
-      if (!thread) {
-        console.warn(`[history] Thread ${threadId} not found`);
-        return [];
-      }
-      if (thread.userId !== userId) {
-        console.error(`[history] Unauthorized: User ${userId} cannot access thread ${threadId}`);
-        throw new Error(`Unauthorized access to thread ${threadId}`);
-      }
-
-      const messages = await historyAdapter.get(threadId);
-      return convertToAgentResults(messages);
-    },
-
-    /**
-     * Save user message immediately at start of run.
-     */
-    appendUserMessage: async ({ threadId, userMessage }) => {
-      if (!threadId) return;
-      await historyAdapter.appendMessage(threadId, 'user', userMessage.content);
-    },
-
-    /**
-     * Save agent results after run completes.
-     */
-    appendResults: async ({ threadId, newResults }) => {
-      if (!threadId) return;
-      const messages = newResults.flatMap((result) =>
-        result.output.map((output) => ({
-          role: 'assistant' as const,
-          content: output,
-          agentName: result.agentName,
-        }))
-      );
-      await historyAdapter.appendResults(threadId, messages);
-    },
-  },
-
-  /**
-   * LLM-only router for intent classification.
-   *
-   * Routing priority:
-   * 1. Completion check - Stop if work is done
-   * 2. User confirmed handoff - User said "yes" to a handoff suggestion
-   * 3. Agent-requested handoff - Explicit delegation via state
-   * 4. Sticky behavior - Keep current agent running
-   * 5. LLM classification - Route based on intent analysis
-   */
-  router: async ({ network, input, lastResult }) => {
-    const state = network.state.kv;
-
-    // Priority 1: Check if work is complete - return undefined to stop the network
-    if (state.get('complete')) {
-      console.log('[router] Task complete, stopping network');
-      state.delete('currentAgent');
-      return undefined;
-    }
-
-    // Priority 2: User confirmed handoff from previous suggestion
-    const handoffSuggested = state.get('handoff_suggested') as string | undefined;
-    if (handoffSuggested && userConfirmsHandoff(input)) {
-      state.delete('handoff_suggested');
-      state.set('currentAgent', handoffSuggested);
-      console.log('[router] User confirmed handoff to:', handoffSuggested);
-      return handoffSuggested === 'coding' ? codingAgent : logAnalyzer;
-    }
-    // Clear stale handoff suggestion if user didn't confirm
-    if (handoffSuggested) {
-      state.delete('handoff_suggested');
-    }
-
-    // Priority 3: Check if an agent explicitly requested a handoff via state
-    const nextAgent = state.get('route_to') as string | undefined;
-    if (nextAgent) {
-      state.delete('route_to');
-      state.set('currentAgent', nextAgent);
-      console.log('[router] Agent requested handoff to:', nextAgent);
-      return nextAgent === 'coding' ? codingAgent : logAnalyzer;
-    }
-
-    // Priority 4: Sticky behavior - if an agent is already running, keep using it
-    const currentAgent = state.get('currentAgent') as string | undefined;
-    if (currentAgent && lastResult) {
-      console.log('[router] Sticky: continuing with', currentAgent);
-      return currentAgent === 'coding' ? codingAgent : logAnalyzer;
-    }
-
-    // Priority 5: LLM classification for all initial routing
-    console.log('[router] Classifying intent with LLM');
-    const routingDecision = await classifyIntentWithLLM(input);
-    console.log('[router] LLM decision:', JSON.stringify(routingDecision));
-
-    // Handle low confidence or unclear intent
-    if (routingDecision.agent === 'unclear' || routingDecision.confidence < ROUTING_CONFIDENCE_THRESHOLD) {
-      console.log('[router] Low confidence, requesting clarification');
-      state.set('needs_clarification', true);
-      state.set('currentAgent', 'log-analyzer'); // Default to read-only agent
-      return logAnalyzer;
-    }
-
-    state.set('currentAgent', routingDecision.agent);
-    return routingDecision.agent === 'coding' ? codingAgent : logAnalyzer;
-  },
-});
-
-/**
  * Check if user is confirming a handoff suggestion.
  *
  * Detects affirmative responses like "yes", "ok", "sure", etc.
@@ -310,7 +163,7 @@ function userConfirmsHandoff(input: string): boolean {
     'please do',
     'please proceed',
     'sounds good',
-    'let\'s do it',
+    "let's do it",
   ];
   const lower = input.toLowerCase().trim();
 
@@ -385,4 +238,171 @@ Examples:
   }
 }
 
-export type { Agent };
+/**
+ * Create the agent network with publish function injected.
+ *
+ * The publish function is passed to agents that use dangerous tools,
+ * enabling them to emit hitl.requested events for the dashboard.
+ *
+ * @param context - Factory context with publish function
+ * @returns Configured agent network
+ */
+export function createAgentNetwork({ publish }: FactoryContext) {
+  // Create agents with publish function injected
+  const codingAgent = createCodingAgent({ publish });
+  const logAnalyzer = createLogAnalyzer({ publish });
+
+  return createNetwork({
+    name: 'ops-network',
+    agents: [codingAgent, logAnalyzer],
+    defaultModel: anthropic({
+      model: 'claude-sonnet-4-20250514',
+      defaultParameters: {
+        max_tokens: 4096,
+      },
+    }),
+
+    // Limit iterations to prevent runaway execution
+    maxIter: 15,
+
+    /**
+     * History configuration for thread and message persistence.
+     *
+     * Uses client-authoritative threadIds - if the client provides a threadId,
+     * we ensure the thread exists. Otherwise, we create a new one.
+     */
+    history: {
+      /**
+       * Create or ensure thread exists when needed.
+       * Supports both server-generated and client-generated threadIds.
+       */
+      createThread: async ({ state }) => {
+        const userId = state.kv.get('userId') as string;
+        const clientThreadId = state.kv.get('threadId') as string | undefined;
+
+        if (clientThreadId) {
+          // Client-authoritative: ensure thread exists with client-provided ID
+          await historyAdapter.ensureThread(clientThreadId, userId);
+          return { threadId: clientThreadId };
+        }
+
+        // Server-authoritative: create new thread
+        const threadId = await historyAdapter.createThread(userId);
+        return { threadId };
+      },
+
+      /**
+       * Load conversation history from database.
+       * Verifies thread ownership before returning messages.
+       */
+      get: async ({ threadId, state }) => {
+        if (!threadId) return [];
+
+        // Verify thread ownership
+        const userId = state.kv.get('userId') as string;
+        const thread = await historyAdapter.getThread(threadId);
+        if (!thread) {
+          console.warn(`[history] Thread ${threadId} not found`);
+          return [];
+        }
+        if (thread.userId !== userId) {
+          console.error(`[history] Unauthorized: User ${userId} cannot access thread ${threadId}`);
+          throw new Error(`Unauthorized access to thread ${threadId}`);
+        }
+
+        const messages = await historyAdapter.get(threadId);
+        return convertToAgentResults(messages);
+      },
+
+      /**
+       * Save user message immediately at start of run.
+       */
+      appendUserMessage: async ({ threadId, userMessage }) => {
+        if (!threadId) return;
+        await historyAdapter.appendMessage(threadId, 'user', userMessage.content);
+      },
+
+      /**
+       * Save agent results after run completes.
+       */
+      appendResults: async ({ threadId, newResults }) => {
+        if (!threadId) return;
+        const messages = newResults.flatMap((result) =>
+          result.output.map((output) => ({
+            role: 'assistant' as const,
+            content: output,
+            agentName: result.agentName,
+          }))
+        );
+        await historyAdapter.appendResults(threadId, messages);
+      },
+    },
+
+    /**
+     * LLM-only router for intent classification.
+     *
+     * Routing priority:
+     * 1. Completion check - Stop if work is done
+     * 2. User confirmed handoff - User said "yes" to a handoff suggestion
+     * 3. Agent-requested handoff - Explicit delegation via state
+     * 4. Sticky behavior - Keep current agent running
+     * 5. LLM classification - Route based on intent analysis
+     */
+    router: async ({ network, input, lastResult }) => {
+      const state = network.state.kv;
+
+      // Priority 1: Check if work is complete - return undefined to stop the network
+      if (state.get('complete')) {
+        console.log('[router] Task complete, stopping network');
+        state.delete('currentAgent');
+        return undefined;
+      }
+
+      // Priority 2: User confirmed handoff from previous suggestion
+      const handoffSuggested = state.get('handoff_suggested') as string | undefined;
+      if (handoffSuggested && userConfirmsHandoff(input)) {
+        state.delete('handoff_suggested');
+        state.set('currentAgent', handoffSuggested);
+        console.log('[router] User confirmed handoff to:', handoffSuggested);
+        return handoffSuggested === 'coding' ? codingAgent : logAnalyzer;
+      }
+      // Clear stale handoff suggestion if user didn't confirm
+      if (handoffSuggested) {
+        state.delete('handoff_suggested');
+      }
+
+      // Priority 3: Check if an agent explicitly requested a handoff via state
+      const nextAgent = state.get('route_to') as string | undefined;
+      if (nextAgent) {
+        state.delete('route_to');
+        state.set('currentAgent', nextAgent);
+        console.log('[router] Agent requested handoff to:', nextAgent);
+        return nextAgent === 'coding' ? codingAgent : logAnalyzer;
+      }
+
+      // Priority 4: Sticky behavior - if an agent is already running, keep using it
+      const currentAgent = state.get('currentAgent') as string | undefined;
+      if (currentAgent && lastResult) {
+        console.log('[router] Sticky: continuing with', currentAgent);
+        return currentAgent === 'coding' ? codingAgent : logAnalyzer;
+      }
+
+      // Priority 5: LLM classification for all initial routing
+      console.log('[router] Classifying intent with LLM');
+      const routingDecision = await classifyIntentWithLLM(input);
+      console.log('[router] LLM decision:', JSON.stringify(routingDecision));
+
+      // Handle low confidence or unclear intent
+      if (routingDecision.agent === 'unclear' || routingDecision.confidence < ROUTING_CONFIDENCE_THRESHOLD) {
+        console.log('[router] Low confidence, requesting clarification');
+        state.set('needs_clarification', true);
+        state.set('currentAgent', 'log-analyzer'); // Default to read-only agent
+        return logAnalyzer;
+      }
+
+      state.set('currentAgent', routingDecision.agent);
+      return routingDecision.agent === 'coding' ? codingAgent : logAnalyzer;
+    },
+  });
+}
+

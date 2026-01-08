@@ -32,8 +32,6 @@ export interface ToolApprovalProps {
     name: string;
     args: Record<string, unknown>;
   };
-  /** Inngest run ID for correlation */
-  runId: string;
   /** Agent that requested this tool (optional) */
   agentName?: string;
   /** Reason provided by the agent for why this tool needs to run */
@@ -84,7 +82,6 @@ function getToolRiskLevel(toolName: string): 'high' | 'medium' | 'low' {
 
 export function ToolApproval({
   tool,
-  runId,
   agentName,
   reason,
   onApprove,
@@ -103,22 +100,22 @@ export function ToolApproval({
 
   const riskColors = {
     high: {
-      bg: 'bg-red-50',
-      border: 'border-red-200',
-      icon: 'text-red-600',
-      badge: 'bg-red-100 text-red-700',
+      bg: 'bg-red-50 dark:bg-red-900/30',
+      border: 'border-red-200 dark:border-red-800',
+      icon: 'text-red-600 dark:text-red-400',
+      badge: 'bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300',
     },
     medium: {
-      bg: 'bg-yellow-50',
-      border: 'border-yellow-200',
-      icon: 'text-yellow-600',
-      badge: 'bg-yellow-100 text-yellow-700',
+      bg: 'bg-yellow-50 dark:bg-yellow-900/30',
+      border: 'border-yellow-200 dark:border-yellow-800',
+      icon: 'text-yellow-600 dark:text-yellow-400',
+      badge: 'bg-yellow-100 dark:bg-yellow-900/50 text-yellow-700 dark:text-yellow-300',
     },
     low: {
-      bg: 'bg-blue-50',
-      border: 'border-blue-200',
-      icon: 'text-blue-600',
-      badge: 'bg-blue-100 text-blue-700',
+      bg: 'bg-blue-50 dark:bg-blue-900/30',
+      border: 'border-blue-200 dark:border-blue-800',
+      icon: 'text-blue-600 dark:text-blue-400',
+      badge: 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300',
     },
   };
 
@@ -144,7 +141,7 @@ export function ToolApproval({
               d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
             />
           </svg>
-          <h4 className="font-semibold text-gray-900">Approval Required</h4>
+          <h4 className="font-semibold text-gray-900 dark:text-gray-100">Approval Required</h4>
         </div>
         <span className={`text-xs px-2 py-1 rounded-full ${colors.badge}`}>
           {riskLevel.toUpperCase()} RISK
@@ -154,22 +151,22 @@ export function ToolApproval({
       {/* Tool Info */}
       <div className="mb-4">
         <div className="flex items-center gap-2 mb-1">
-          <span className="font-mono text-sm font-medium text-gray-800">
+          <span className="font-mono text-sm font-medium text-gray-800 dark:text-gray-200">
             {tool.name}
           </span>
           {agentName && (
-            <span className="text-xs text-gray-500">via {agentName}</span>
+            <span className="text-xs text-gray-500 dark:text-gray-400">via {agentName}</span>
           )}
         </div>
-        <p className="text-sm text-gray-600">{description}</p>
+        <p className="text-sm text-gray-600 dark:text-gray-400">{description}</p>
       </div>
 
       {/* Arguments */}
       <div className="mb-4">
-        <label className="block text-xs font-medium text-gray-500 uppercase mb-1">
+        <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">
           Arguments
         </label>
-        <pre className="bg-gray-900 text-gray-100 rounded-lg p-3 overflow-x-auto text-sm font-mono">
+        <pre className="bg-gray-900 dark:bg-gray-950 text-gray-100 rounded-lg p-3 overflow-x-auto text-sm font-mono">
           {formatArgs(tool.args)}
         </pre>
       </div>
@@ -179,13 +176,13 @@ export function ToolApproval({
         <div className="mb-4">
           <label
             htmlFor={`feedback-${tool.id}`}
-            className="block text-sm font-medium text-gray-700 mb-1"
+            className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
           >
             Rejection Reason (optional)
           </label>
           <textarea
             id={`feedback-${tool.id}`}
-            className="w-full border border-gray-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500"
+            className="w-full border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-lg p-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500 placeholder-gray-400 dark:placeholder-gray-500"
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
             placeholder="Explain why this action should not be performed..."
@@ -259,9 +256,9 @@ export function ToolApproval({
         </button>
       </div>
 
-      {/* Run ID for debugging */}
-      <div className="mt-3 text-xs text-gray-400">
-        Run ID: {runId} | Tool ID: {tool.id}
+      {/* Tool ID for debugging */}
+      <div className="mt-3 text-xs text-gray-400 dark:text-gray-500">
+        Tool ID: {tool.id}
       </div>
     </div>
   );

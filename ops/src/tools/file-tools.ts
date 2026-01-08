@@ -12,6 +12,13 @@ import * as path from 'node:path';
 import { glob } from 'node:fs/promises';
 
 /**
+ * Default workspace root directory.
+ * Uses WORK_DIR environment variable (set in docker-compose.yaml) with /workspace fallback.
+ * This matches the pattern in security.ts for consistency.
+ */
+const WORKSPACE_ROOT = process.env.WORK_DIR || '/workspace';
+
+/**
  * Read the contents of a file at the given path.
  *
  * Returns the file content as a string, or an error object
@@ -29,9 +36,10 @@ export const readFileTool = createTool({
     if (!step) {
       try {
         // Fallback: execute directly without step wrapper
+        // Resolve relative paths against WORKSPACE_ROOT for consistency
         const absolutePath = path.isAbsolute(filePath)
           ? filePath
-          : path.resolve(filePath);
+          : path.resolve(WORKSPACE_ROOT, filePath);
 
         const stats = await fs.stat(absolutePath);
         if (stats.isDirectory()) {
@@ -63,9 +71,10 @@ export const readFileTool = createTool({
     return step.run('read-file', async () => {
       try {
         // Ensure we're dealing with an absolute path
+        // Resolve relative paths against WORKSPACE_ROOT for consistency
         const absolutePath = path.isAbsolute(filePath)
           ? filePath
-          : path.resolve(filePath);
+          : path.resolve(WORKSPACE_ROOT, filePath);
 
         const stats = await fs.stat(absolutePath);
         if (stats.isDirectory()) {
@@ -113,7 +122,7 @@ export const findFilesTool = createTool({
     cwd: z
       .string()
       .optional()
-      .describe('Base directory to search from (defaults to current working directory)'),
+      .describe('Base directory to search from (defaults to WORK_DIR, typically /workspace)'),
     maxResults: z
       .number()
       .optional()
@@ -126,8 +135,8 @@ export const findFilesTool = createTool({
         const baseDir = cwd
           ? path.isAbsolute(cwd)
             ? cwd
-            : path.resolve(cwd)
-          : process.cwd();
+            : path.resolve(WORKSPACE_ROOT, cwd)
+          : WORKSPACE_ROOT;
 
         // Verify base directory exists
         try {
@@ -195,7 +204,7 @@ export const searchCodeTool = createTool({
     cwd: z
       .string()
       .optional()
-      .describe('Base directory to search from (defaults to current working directory)'),
+      .describe('Base directory to search from (defaults to WORK_DIR, typically /workspace)'),
     isRegex: z
       .boolean()
       .optional()
@@ -226,8 +235,8 @@ export const searchCodeTool = createTool({
         const baseDir = cwd
           ? path.isAbsolute(cwd)
             ? cwd
-            : path.resolve(cwd)
-          : process.cwd();
+            : path.resolve(WORKSPACE_ROOT, cwd)
+          : WORKSPACE_ROOT;
 
         // Build the regex for searching
         let searchRegex: RegExp;

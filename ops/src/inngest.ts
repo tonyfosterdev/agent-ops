@@ -6,6 +6,10 @@
  *
  * Includes realtimeMiddleware for streaming updates to the dashboard
  * via Inngest's realtime infrastructure.
+ *
+ * Event Schema:
+ * - 'agent/chat.requested': Triggered by useAgents when user sends a message
+ * - 'agentops/tool.approval': HITL approval/rejection for tool calls
  */
 import { Inngest, EventSchemas } from 'inngest';
 import { realtimeMiddleware } from '@inngest/realtime/middleware';
@@ -13,23 +17,38 @@ import { config } from './config.js';
 
 /**
  * Custom event schemas for the AgentOps application.
- * These define the shape of events used in the system.
+ *
+ * These define the shape of events used in the system. The 'agent/chat.requested'
+ * event matches the format expected by @inngest/use-agent hook.
  */
 const agentOpsEventSchemas = new EventSchemas().fromRecord<{
-  // Triggered when a user sends a chat message
-  'agent/chat': {
+  // useAgents sends this event format when user sends a message
+  'agent/chat.requested': {
     data: {
-      threadId: string;
-      message: string;
-      userId?: string;
+      /** Optional thread ID for conversation continuity */
+      threadId?: string;
+      /** User message with ID, content, and role */
+      userMessage: {
+        id: string;
+        content: string;
+        role: 'user';
+      };
+      /** User identifier for channel scoping */
+      userId: string;
+      /** Channel key for realtime subscription (defaults to userId) */
+      channelKey?: string;
+      /** Conversation history for context */
+      history?: Array<{ role: string; content: string }>;
     };
   };
-  // Approval/rejection events for HITL tool calls
+  // HITL approval/rejection events for tool calls
   'agentops/tool.approval': {
     data: {
-      runId: string;
+      /** Tool call ID for correlation */
       toolCallId: string;
+      /** Whether the tool execution is approved */
       approved: boolean;
+      /** Optional feedback from user */
       feedback?: string;
     };
   };

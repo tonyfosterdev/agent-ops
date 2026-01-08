@@ -242,33 +242,6 @@ export async function healthCheck(): Promise<{
 }
 
 /**
- * Subscription token structure returned from server.
- * This matches the Inngest Realtime Token type.
- */
-export interface RealtimeToken {
-  key?: string;
-  channel: string;
-  topics: string[];
-}
-
-/**
- * Get a real-time subscription token for a thread.
- *
- * The token is used with useInngestSubscription to receive
- * streaming events for the specified thread.
- *
- * @param threadId - Thread UUID to subscribe to
- * @param userId - User ID for authorization (must own the thread)
- * @returns Subscription token for Inngest Realtime
- */
-export async function getRealtimeToken(
-  threadId: string,
-  userId: string
-): Promise<{ token: RealtimeToken }> {
-  return apiFetch(`/realtime/token?threadId=${encodeURIComponent(threadId)}&userId=${encodeURIComponent(userId)}`);
-}
-
-/**
  * Export the Inngest Dev URL for direct event posting if needed.
  */
 export function getInngestDevUrl(): string {
