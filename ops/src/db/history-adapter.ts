@@ -17,10 +17,35 @@
  *   agents: [codingAgent, logAnalyzer],
  *   defaultModel: anthropic({ model: 'claude-sonnet-4-20250514' }),
  *
- *   // Wire up the history adapter
+ *   // Wire up the history adapter via HistoryConfig
  *   history: {
- *     get: (threadId) => historyAdapter.get(threadId),
- *     append: (threadId, messages) => historyAdapter.appendResults(threadId, messages),
+ *     createThread: async ({ state }) => {
+ *       const userId = state.kv.get('userId') as string;
+ *       const clientThreadId = state.kv.get('threadId') as string | undefined;
+ *       if (clientThreadId) {
+ *         await historyAdapter.ensureThread(clientThreadId, userId);
+ *         return { threadId: clientThreadId };
+ *       }
+ *       const threadId = await historyAdapter.createThread(userId);
+ *       return { threadId };
+ *     },
+ *     get: async ({ threadId }) => {
+ *       const messages = await historyAdapter.get(threadId);
+ *       return convertToAgentResults(messages);
+ *     },
+ *     appendUserMessage: async ({ threadId, userMessage }) => {
+ *       await historyAdapter.appendMessage(threadId, 'user', userMessage.content);
+ *     },
+ *     appendResults: async ({ threadId, newResults }) => {
+ *       const messages = newResults.flatMap(result =>
+ *         result.output.map(output => ({
+ *           role: 'assistant' as const,
+ *           content: output,
+ *           agentName: result.agentName,
+ *         }))
+ *       );
+ *       await historyAdapter.appendResults(threadId, messages);
+ *     },
  *   },
  * });
  * ```
@@ -41,6 +66,12 @@
  * duplicate inserts when Inngest retries a step after a transient failure. The
  * checksum is truncated to 32 hex chars (128 bits) which is sufficient for the
  * expected message volume.
+ *
+ * ## Security Note
+ *
+ * Thread ownership is verified at the network level in the HistoryConfig callbacks.
+ * The adapter methods themselves do not perform authorization checks - callers must
+ * ensure users can only access threads they own.
  */
 
 import { createHash } from 'node:crypto';
@@ -113,6 +144,23 @@ function getMessageType(role: MessageRole, agentName?: string): MessageType {
  * the AgentKit starter kit patterns.
  */
 export const historyAdapter = {
+  /**
+   * Ensure a thread exists, creating it if needed.
+   *
+   * Used for client-authoritative threadIds where the client generates
+   * the thread ID and the server ensures it exists before use.
+   *
+   * @param threadId - UUID of the thread (client-generated)
+   * @param userId - Identifier for the user owning the thread
+   * @param title - Optional title for the thread
+   */
+  async ensureThread(threadId: string, userId: string, title?: string): Promise<void> {
+    await sql`
+      INSERT INTO agent_threads (id, user_id, title)
+      VALUES (${threadId}, ${userId}, ${title ?? null})
+      ON CONFLICT (id) DO NOTHING
+    `;
+  },
   /**
    * Create a new conversation thread.
    *

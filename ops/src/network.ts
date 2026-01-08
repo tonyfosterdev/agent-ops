@@ -1,12 +1,22 @@
 /**
- * Agent Network with Hybrid Router for AgentOps.
+ * Agent Network with LLM-Only Router for AgentOps.
  *
  * Creates the AgentKit network that orchestrates multiple agents for
- * operations tasks. The network uses a hybrid routing strategy:
+ * operations tasks. The network uses LLM classification for all initial
+ * routing decisions to ensure correctness.
  *
- * 1. Deterministic code-based rules (fast, predictable)
- * 2. Agent-requested handoffs via state (explicit delegation)
- * 3. AgentKit's built-in LLM routing agent (fallback for ambiguous cases)
+ * Routing Priority:
+ * 1. Completion check - Stop if work is done
+ * 2. User confirmed handoff - User said "yes" to a handoff suggestion
+ * 3. Agent-requested handoff - Explicit delegation via state
+ * 4. Sticky behavior - Keep current agent running
+ * 5. LLM classification - Route based on intent analysis
+ *
+ * Design Decision: We use LLM-only routing (no keyword matching) because:
+ * - Keyword matching has false positives (e.g., "fix the" in "I got an error trying to fix the code")
+ * - LLM understands context and nuance that keywords cannot
+ * - Correctness is prioritized over latency
+ * - Future optimization: add keyword caching for proven patterns if needed
  *
  * ## Agents
  *
@@ -21,27 +31,109 @@
  * - `complete`: Set to true when work is done (network stops)
  * - `runId`: Inngest run ID for HITL event correlation
  * - `threadId`: Thread ID for history persistence
+ * - `userId`: User ID for thread ownership
+ * - `handoff_suggested`: Agent suggested handoff, awaiting user confirmation
+ * - `needs_clarification`: Router flagged ambiguous input, agent should ask
  *
  * ## History Integration
  *
- * The network can be run with pre-loaded history from the database:
+ * The network uses AgentKit's HistoryConfig for automatic persistence:
+ * - createThread: Creates/ensures thread exists (supports client-generated IDs)
+ * - get: Loads conversation history from database
+ * - appendUserMessage: Saves user message at start of run
+ * - appendResults: Saves agent results after run completes
  *
- * ```typescript
- * const history = await historyAdapter.get(threadId);
- * const result = await agentNetwork.run(message, { step, history });
- * await historyAdapter.appendResults(threadId, result.messages);
- * ```
+ * History is managed entirely by the network - callers just need to provide
+ * userId and optionally threadId in the state.
  */
 
-import { createNetwork, type Agent } from '@inngest/agent-kit';
+import { createNetwork, AgentResult, type Agent } from '@inngest/agent-kit';
 import { anthropic } from '@inngest/agent-kit';
+import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
 import { codingAgent, logAnalyzer } from './agents/index.js';
+import { config } from './config.js';
+import { historyAdapter, type StoredMessage } from './db/index.js';
+
+/**
+ * Lazy-initialized Anthropic client for router LLM calls.
+ * Uses the same API key as the main agent network.
+ */
+let routerClient: Anthropic | null = null;
+
+function getRouterClient(): Anthropic {
+  if (!routerClient) {
+    routerClient = new Anthropic({
+      apiKey: config.anthropic.apiKey,
+    });
+  }
+  return routerClient;
+}
+
+/**
+ * Configurable confidence threshold for LLM routing decisions.
+ * Below this threshold, the router will ask for clarification.
+ */
+const ROUTING_CONFIDENCE_THRESHOLD = parseFloat(process.env.ROUTING_CONFIDENCE_THRESHOLD ?? '0.7');
+
+/**
+ * Convert stored messages to AgentResult[] format for AgentKit history.
+ *
+ * Groups consecutive assistant messages from the same agent into single AgentResult objects.
+ * User messages are handled separately via appendUserMessage.
+ */
+function convertToAgentResults(messages: StoredMessage[]): AgentResult[] {
+  const results: AgentResult[] = [];
+
+  for (const msg of messages) {
+    // Skip user messages - they're handled separately
+    if (msg.role === 'user') continue;
+
+    // Create an AgentResult for each assistant/tool message
+    // In the future, we could group consecutive messages from the same agent
+    if (msg.role === 'assistant' || msg.role === 'tool') {
+      const output =
+        typeof msg.content === 'string'
+          ? [{ type: 'text' as const, role: 'assistant' as const, content: msg.content }]
+          : Array.isArray(msg.content)
+            ? msg.content
+            : [{ type: 'text' as const, role: 'assistant' as const, content: JSON.stringify(msg.content) }];
+
+      results.push(
+        new AgentResult(
+          msg.agentName || 'unknown',
+          output,
+          [], // toolCalls - could be populated from tool messages
+          msg.createdAt,
+          undefined, // prompt
+          undefined, // history
+          undefined, // raw
+          msg.id // id
+        )
+      );
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Schema for LLM routing decisions.
+ */
+const routingDecisionSchema = z.object({
+  agent: z.enum(['log-analyzer', 'coding', 'unclear']),
+  confidence: z.number().min(0).max(1),
+  reason: z.string(),
+});
+
+type RoutingDecision = z.infer<typeof routingDecisionSchema>;
 
 /**
  * The main agent network for operations tasks.
  *
- * Orchestrates the coding and log-analyzer agents using a hybrid
- * routing strategy that prioritizes deterministic rules over LLM inference.
+ * Orchestrates the coding and log-analyzer agents using LLM-only
+ * routing for intent classification. All initial routing decisions
+ * go through the LLM to ensure correctness.
  */
 export const agentNetwork = createNetwork({
   name: 'ops-network',
@@ -57,200 +149,240 @@ export const agentNetwork = createNetwork({
   maxIter: 15,
 
   /**
-   * Sticky router: once an agent is selected, it keeps running until handoff.
+   * History configuration for thread and message persistence.
+   *
+   * Uses client-authoritative threadIds - if the client provides a threadId,
+   * we ensure the thread exists. Otherwise, we create a new one.
+   */
+  history: {
+    /**
+     * Create or ensure thread exists when needed.
+     * Supports both server-generated and client-generated threadIds.
+     */
+    createThread: async ({ state }) => {
+      const userId = state.kv.get('userId') as string;
+      const clientThreadId = state.kv.get('threadId') as string | undefined;
+
+      if (clientThreadId) {
+        // Client-authoritative: ensure thread exists with client-provided ID
+        await historyAdapter.ensureThread(clientThreadId, userId);
+        return { threadId: clientThreadId };
+      }
+
+      // Server-authoritative: create new thread
+      const threadId = await historyAdapter.createThread(userId);
+      return { threadId };
+    },
+
+    /**
+     * Load conversation history from database.
+     * Verifies thread ownership before returning messages.
+     */
+    get: async ({ threadId, state }) => {
+      if (!threadId) return [];
+
+      // Verify thread ownership
+      const userId = state.kv.get('userId') as string;
+      const thread = await historyAdapter.getThread(threadId);
+      if (!thread) {
+        console.warn(`[history] Thread ${threadId} not found`);
+        return [];
+      }
+      if (thread.userId !== userId) {
+        console.error(`[history] Unauthorized: User ${userId} cannot access thread ${threadId}`);
+        throw new Error(`Unauthorized access to thread ${threadId}`);
+      }
+
+      const messages = await historyAdapter.get(threadId);
+      return convertToAgentResults(messages);
+    },
+
+    /**
+     * Save user message immediately at start of run.
+     */
+    appendUserMessage: async ({ threadId, userMessage }) => {
+      if (!threadId) return;
+      await historyAdapter.appendMessage(threadId, 'user', userMessage.content);
+    },
+
+    /**
+     * Save agent results after run completes.
+     */
+    appendResults: async ({ threadId, newResults }) => {
+      if (!threadId) return;
+      const messages = newResults.flatMap((result) =>
+        result.output.map((output) => ({
+          role: 'assistant' as const,
+          content: output,
+          agentName: result.agentName,
+        }))
+      );
+      await historyAdapter.appendResults(threadId, messages);
+    },
+  },
+
+  /**
+   * LLM-only router for intent classification.
    *
    * Routing priority:
-   * 1. Check if work is complete (stop the network)
-   * 2. Check for explicit handoff request via state
-   * 3. If an agent is already active, keep using it (sticky behavior)
-   * 4. For initial routing, use keyword-based rules on the INPUT only
-   *
-   * This prevents the router from switching agents based on agent output,
-   * which caused issues where agents would mention keywords that triggered
-   * routing to an agent without the required tools.
+   * 1. Completion check - Stop if work is done
+   * 2. User confirmed handoff - User said "yes" to a handoff suggestion
+   * 3. Agent-requested handoff - Explicit delegation via state
+   * 4. Sticky behavior - Keep current agent running
+   * 5. LLM classification - Route based on intent analysis
    */
   router: async ({ network, input, lastResult }) => {
     const state = network.state.kv;
 
-    // 1. Check if work is complete - return undefined to stop the network
+    // Priority 1: Check if work is complete - return undefined to stop the network
     if (state.get('complete')) {
-      state.delete('currentAgent'); // Clean up
+      console.log('[router] Task complete, stopping network');
+      state.delete('currentAgent');
       return undefined;
     }
 
-    // 2. Check if an agent explicitly requested a handoff via state
-    // This takes priority because it represents an agent's deliberate decision
+    // Priority 2: User confirmed handoff from previous suggestion
+    const handoffSuggested = state.get('handoff_suggested') as string | undefined;
+    if (handoffSuggested && userConfirmsHandoff(input)) {
+      state.delete('handoff_suggested');
+      state.set('currentAgent', handoffSuggested);
+      console.log('[router] User confirmed handoff to:', handoffSuggested);
+      return handoffSuggested === 'coding' ? codingAgent : logAnalyzer;
+    }
+    // Clear stale handoff suggestion if user didn't confirm
+    if (handoffSuggested) {
+      state.delete('handoff_suggested');
+    }
+
+    // Priority 3: Check if an agent explicitly requested a handoff via state
     const nextAgent = state.get('route_to') as string | undefined;
     if (nextAgent) {
-      // Clear the route_to flag to prevent routing loops
       state.delete('route_to');
-
-      // Update the current agent
       state.set('currentAgent', nextAgent);
-
-      if (nextAgent === 'coding') {
-        return codingAgent;
-      }
-      if (nextAgent === 'log-analyzer') {
-        return logAnalyzer;
-      }
+      console.log('[router] Agent requested handoff to:', nextAgent);
+      return nextAgent === 'coding' ? codingAgent : logAnalyzer;
     }
 
-    // 3. Sticky behavior: if an agent is already running, keep using it
-    // This prevents switching based on agent output containing keywords
+    // Priority 4: Sticky behavior - if an agent is already running, keep using it
     const currentAgent = state.get('currentAgent') as string | undefined;
     if (currentAgent && lastResult) {
-      // Agent has already produced output, keep using the same agent
-      if (currentAgent === 'coding') {
-        return codingAgent;
-      }
-      if (currentAgent === 'log-analyzer') {
-        return logAnalyzer;
-      }
+      console.log('[router] Sticky: continuing with', currentAgent);
+      return currentAgent === 'coding' ? codingAgent : logAnalyzer;
     }
 
-    // 4. Initial routing: use keyword-based rules on the ORIGINAL INPUT only
-    // This only runs on the first iteration (when lastResult is undefined)
-    const lowerInput = input.toLowerCase();
+    // Priority 5: LLM classification for all initial routing
+    console.log('[router] Classifying intent with LLM');
+    const routingDecision = await classifyIntentWithLLM(input);
+    console.log('[router] LLM decision:', JSON.stringify(routingDecision));
 
-    // Check code keywords FIRST - coding agent can delegate to log-analyzer
-    // This prevents log-analyzer from trying to use code tools it doesn't have
-    if (containsCodeKeywords(lowerInput)) {
-      state.set('currentAgent', 'coding');
-      return codingAgent;
-    }
-
-    // Route log-related queries to log-analyzer
-    if (containsLogKeywords(lowerInput)) {
-      state.set('currentAgent', 'log-analyzer');
+    // Handle low confidence or unclear intent
+    if (routingDecision.agent === 'unclear' || routingDecision.confidence < ROUTING_CONFIDENCE_THRESHOLD) {
+      console.log('[router] Low confidence, requesting clarification');
+      state.set('needs_clarification', true);
+      state.set('currentAgent', 'log-analyzer'); // Default to read-only agent
       return logAnalyzer;
     }
 
-    // 5. Fallback: Default to coding agent for general tasks
-    // Coding agent has more versatile tools and can hand off to log-analyzer
-    state.set('currentAgent', 'coding');
-    return codingAgent;
+    state.set('currentAgent', routingDecision.agent);
+    return routingDecision.agent === 'coding' ? codingAgent : logAnalyzer;
   },
 });
 
 /**
- * Extract text content from a message object.
+ * Check if user is confirming a handoff suggestion.
  *
- * AgentKit messages can have various content formats:
- * - String (simple text)
- * - Array of parts (with text, tool calls, etc.)
- * - Object with content property
+ * Detects affirmative responses like "yes", "ok", "sure", etc.
+ * Uses strict matching to avoid false positives on phrases
+ * that just happen to start with these words.
  */
-function extractMessageContent(message: unknown): string {
-  if (!message) return '';
+function userConfirmsHandoff(input: string): boolean {
+  const confirmations = [
+    'yes',
+    'yeah',
+    'yep',
+    'ok',
+    'okay',
+    'sure',
+    'go ahead',
+    'do it',
+    'proceed',
+    'yes please',
+    'please do',
+    'please proceed',
+    'sounds good',
+    'let\'s do it',
+  ];
+  const lower = input.toLowerCase().trim();
 
-  // Handle string content directly
-  if (typeof message === 'string') return message;
+  // Check for exact match or match at start of sentence
+  return confirmations.some(
+    (c) => lower === c || lower.startsWith(c + ' ') || lower.startsWith(c + ',') || lower.startsWith(c + '.')
+  );
+}
 
-  // Handle message object with content property
-  if (typeof message === 'object' && message !== null) {
-    const msg = message as Record<string, unknown>;
+/**
+ * Classify user intent using LLM for ambiguous cases.
+ *
+ * Uses structured messages to prevent prompt injection and
+ * validates response with Zod schema. Falls back to log-analyzer
+ * on any errors for safety (read-only operations).
+ *
+ * Uses a small, fast model (claude-3.5-haiku) for quick routing decisions.
+ */
+async function classifyIntentWithLLM(input: string): Promise<RoutingDecision> {
+  try {
+    const client = getRouterClient();
 
-    // Direct content property (string)
-    if (typeof msg.content === 'string') {
-      return msg.content;
+    // Use structured messages to prevent prompt injection
+    const response = await client.messages.create({
+      model: 'claude-3-5-haiku-20241022',
+      max_tokens: 150,
+      system: `You are a routing classifier. Analyze the user's message and determine their intent.
+
+Return ONLY valid JSON in this exact format:
+{"agent": "log-analyzer" | "coding" | "unclear", "confidence": 0.0-1.0, "reason": "brief explanation"}
+
+Categories:
+- log-analyzer: Questions about errors, logs, what happened, checking status, investigating issues
+- coding: Requests to fix code, modify files, implement features, write code
+- unclear: Genuinely ambiguous, could be either, need more context
+
+Examples:
+- "What's causing the 500 errors?" -> {"agent": "log-analyzer", "confidence": 0.9, "reason": "investigating errors"}
+- "Fix the authentication bug" -> {"agent": "coding", "confidence": 0.95, "reason": "explicit fix request"}
+- "The API is broken" -> {"agent": "unclear", "confidence": 0.4, "reason": "could be log investigation or code fix"}`,
+      messages: [
+        {
+          role: 'user',
+          content: input,
+        },
+      ],
+    });
+
+    // Extract text content from response
+    const textContent = response.content
+      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+      .map((block) => block.text)
+      .join('');
+
+    // Parse JSON from response
+    const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn('[router] Could not extract JSON from LLM response:', textContent);
+      return { agent: 'log-analyzer', confidence: 0.5, reason: 'parse_error_fallback' };
     }
 
-    // Content as array of parts
-    if (Array.isArray(msg.content)) {
-      return msg.content
-        .map((part: unknown) => {
-          if (typeof part === 'string') return part;
-          if (typeof part === 'object' && part !== null) {
-            const p = part as Record<string, unknown>;
-            if (p.type === 'text' && typeof p.text === 'string') {
-              return p.text;
-            }
-          }
-          return '';
-        })
-        .join(' ');
+    const parsed = routingDecisionSchema.safeParse(JSON.parse(jsonMatch[0]));
+    if (!parsed.success) {
+      console.warn('[router] Invalid LLM response schema:', parsed.error.message);
+      return { agent: 'log-analyzer', confidence: 0.5, reason: 'schema_error_fallback' };
     }
+
+    return parsed.data;
+  } catch (error) {
+    console.error('[router] LLM classification failed:', error);
+    return { agent: 'log-analyzer', confidence: 0.5, reason: 'api_error_fallback' };
   }
-
-  return '';
-}
-
-/**
- * Check if content contains log-related keywords.
- */
-function containsLogKeywords(content: string): boolean {
-  const logKeywords = [
-    'log',
-    'logs',
-    'error',
-    'errors',
-    'trace',
-    'traces',
-    'loki',
-    'logql',
-    'warning',
-    'warnings',
-    'exception',
-    'stack trace',
-    'stacktrace',
-  ];
-
-  return logKeywords.some((keyword) => content.includes(keyword));
-}
-
-/**
- * Check if content contains code-related keywords.
- */
-function containsCodeKeywords(content: string): boolean {
-  const codeKeywords = [
-    // Direct code references
-    'code',
-    'codebase',
-    'source',
-    'src',
-    'file',
-    'files',
-    // Actions
-    'fix',
-    'debug',
-    'search',
-    'find',
-    'look',
-    'check',
-    'read',
-    'write',
-    'modify',
-    'change',
-    'update',
-    // Code structure
-    'function',
-    'class',
-    'method',
-    'variable',
-    'module',
-    'import',
-    'export',
-    // Tasks
-    'implement',
-    'refactor',
-    'review',
-    // Languages/tools
-    'typescript',
-    'javascript',
-    'python',
-    'node',
-    'npm',
-    // Dev tasks
-    'test',
-    'tests',
-    'build',
-    'compile',
-    'lint',
-    'type-check',
-  ];
-
-  return codeKeywords.some((keyword) => content.includes(keyword));
 }
 
 export type { Agent };

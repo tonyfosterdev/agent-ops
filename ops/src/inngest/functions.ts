@@ -9,18 +9,27 @@
  *
  * - agentChat: Main chat function that runs the agent network
  *
- * ## HITL Integration
+ * ## Streaming with AgentKit
  *
- * Run context (runId, threadId) is passed through network.run() via state.
- * Tools access these values from network.state.kv during execution. This
- * approach is concurrency-safe because each network.run() gets its own
- * state instance.
+ * Uses AgentKit's built-in streaming via `streaming.publish` in network.run().
+ * All events (run.started, text.delta, tool-call, etc.) are automatically
+ * published to the realtime channel for the useAgents hook to consume.
+ *
+ * ## History Management
+ *
+ * History is managed automatically by AgentKit's HistoryConfig in network.ts:
+ * - createThread: Creates/ensures thread exists (supports client-generated IDs)
+ * - get: Loads conversation history from database
+ * - appendUserMessage: Saves user message at start of run
+ * - appendResults: Saves agent results after run completes
+ *
+ * ## HITL Integration
  *
  * When a tool requires approval, it uses:
  *
  * ```typescript
  * await step.waitForEvent('agentops/tool.approval', {
- *   match: 'data.toolCallId',
+ *   if: `async.data.toolCallId == "${toolCallId}"`,
  *   timeout: '4h',
  * });
  * ```
@@ -30,40 +39,33 @@
  * ```typescript
  * await inngest.send({
  *   name: 'agentops/tool.approval',
- *   data: { runId, toolCallId, approved: true },
+ *   data: { toolCallId, approved: true },
  * });
  * ```
- *
- * ## Real-time Streaming
- *
- * The function publishes events to the dashboard via Inngest Realtime:
- * - `run.started` - When the agent run begins
- * - `run.complete` - When the agent run finishes successfully
- * - `run.error` - When the agent run fails
- *
- * HITL tools publish their own events:
- * - `tool.call` - Before waitForEvent (to show approval UI)
- * - `tool.result` - After execution completes
- *
- * The publish function is passed to tools via network.state.kv.
  */
 
 import { createState } from '@inngest/agent-kit';
 import { inngest } from '../inngest.js';
 import { agentNetwork } from '../network.js';
-import { historyAdapter } from '../db/index.js';
-import { publishToThread, type AgentStreamEvent } from './realtime.js';
+import { AGENT_STREAM_TOPIC } from './realtime.js';
 
 /**
  * Main chat function that runs the agent network.
  *
- * Triggered by 'agent/chat' events from the dashboard or API.
- * Retrieves conversation history, runs the network, and persists results.
+ * Triggered by 'agent/chat.requested' events from the useAgents hook.
+ * Uses AgentKit streaming to push all events to the dashboard in real-time.
+ *
+ * History management is handled automatically by AgentKit's HistoryConfig:
+ * - Thread creation: history.createThread (supports client or server-generated IDs)
+ * - History loading: history.get
+ * - User message persistence: history.appendUserMessage
+ * - Agent result persistence: history.appendResults
  *
  * Event data:
- * - threadId: UUID of the conversation thread
- * - message: User's message to process
- * - userId: Optional user identifier for audit
+ * - threadId: Optional UUID of the conversation thread (client-generated or omitted)
+ * - userMessage: { id, content, role } - The user's message
+ * - userId: User identifier for channel scoping and thread ownership
+ * - channelKey: Optional override for realtime channel (defaults to userId)
  */
 export const agentChat = inngest.createFunction(
   {
@@ -71,105 +73,50 @@ export const agentChat = inngest.createFunction(
     // Retry configuration for transient failures
     retries: 3,
   },
-  { event: 'agent/chat' },
-  async ({ event, step, publish }) => {
-    const { threadId, message, userId } = event.data;
-    // event.id can be undefined in some edge cases; use a fallback
+  { event: 'agent/chat.requested' },
+  async ({ event, publish }) => {
+    const { threadId, userMessage, userId, channelKey } = event.data;
     const runId = event.id ?? `run-${Date.now()}`;
 
-    // Type-safe wrapper for publishing to this thread's channel
-    const publishEvent = (eventData: AgentStreamEvent) => {
-      publishToThread(publish, threadId, eventData);
-    };
+    // Use channelKey if provided, otherwise fall back to userId
+    const subscriptionKey = channelKey || userId;
 
-    // Publish run.started event to notify dashboard
-    publishEvent({
-      type: 'run.started',
+    // Create state with userId and optional threadId for history config to use
+    // AgentKit's history.createThread handles thread creation/lookup
+    const runState = createState({
       runId,
-      threadId,
+      threadId, // Pass through - AgentKit handles creation if missing
+      userId,
     });
 
-    try {
-      // Create a fresh state instance for this run with correlation IDs
-      // This is concurrency-safe: each network.run() gets its own state
-      // Tools access these values via network.state.kv during execution
-      const runState = createState({
-        runId,
-        threadId,
-        userId,
-        // Pass the publish function so HITL tools can send events
-        // Tools retrieve this with: network.state.kv.get('publish')
-        publish: publishEvent,
-      });
+    // Build channel name for realtime publishing
+    const channelName = `user:${subscriptionKey}`;
 
-      // Retrieve conversation history from database
-      const history = await step.run('get-history', async () => {
-        const messages = await historyAdapter.get(threadId);
-        // Convert stored messages to AgentKit history format
-        return messages.map((msg) => ({
-          role: msg.role as 'user' | 'assistant' | 'system' | 'tool',
-          content: msg.content,
-        }));
-      });
+    // Run the agent network with streaming enabled
+    // AgentKit now handles:
+    // - Thread creation (if threadId missing) via history.createThread
+    // - History loading via history.get
+    // - User message persistence via history.appendUserMessage
+    // - Result persistence via history.appendResults
+    const networkRun = await agentNetwork.run(userMessage.content, {
+      state: runState,
+      streaming: {
+        publish: async (chunk) => {
+          // Publish to the user's realtime channel
+          await publish({
+            channel: channelName,
+            topic: AGENT_STREAM_TOPIC,
+            data: chunk,
+          });
+        },
+      },
+    });
 
-      // Append the user's message to history before running
-      await step.run('store-user-message', async () => {
-        await historyAdapter.appendMessage(threadId, 'user', message);
-      });
-
-      // Run the agent network with the full conversation context
-      // The network will route between agents based on the hybrid router
-      // State includes run context for HITL correlation (runId, threadId)
-      // Note: step tools are automatically available via Inngest's async context
-      const networkRun = await agentNetwork.run(message, {
-        state: runState,
-      });
-
-      // Get the results from the network run
-      const results = networkRun.state.results;
-
-      // Persist agent responses to the database
-      await step.run('store-agent-messages', async () => {
-        // Convert network results to history format
-        const agentMessages = results.flatMap((result) =>
-          result.output.map((output) => ({
-            role: 'assistant' as const,
-            content: output,
-            agentName: result.agentName,
-          }))
-        );
-
-        await historyAdapter.appendResults(threadId, agentMessages);
-      });
-
-      // Publish run.complete event to notify dashboard
-      // Using step.run to ensure the event is published before function returns
-      await step.run('publish-run-complete', async () => {
-        publishEvent({
-          type: 'run.complete',
-          runId,
-        });
-      });
-
-      return {
-        success: true,
-        threadId,
-        resultCount: results.length,
-      };
-    } catch (error) {
-      // Publish run.error event to notify dashboard
-      // Using step.run to ensure the event is published before function returns
-      await step.run('publish-run-error', async () => {
-        publishEvent({
-          type: 'run.error',
-          runId,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-      });
-
-      // Re-throw to let Inngest handle retries
-      throw error;
-    }
+    return {
+      success: true,
+      threadId: networkRun.state.threadId,
+      resultCount: networkRun.state.results.length,
+    };
   }
 );
 
