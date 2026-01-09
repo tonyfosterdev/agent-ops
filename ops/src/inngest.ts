@@ -13,6 +13,7 @@
  */
 import { Inngest, EventSchemas } from 'inngest';
 import { realtimeMiddleware } from '@inngest/realtime/middleware';
+import { extendedTracesMiddleware } from 'inngest/experimental';
 import { config } from './config.js';
 
 /**
@@ -70,5 +71,8 @@ export const inngest = new Inngest({
   // Event key is optional in dev mode but required for production
   ...(config.inngest.eventKey && { eventKey: config.inngest.eventKey }),
   // Enable realtime streaming for dashboard updates
-  middleware: [realtimeMiddleware()],
+  // extendedTracesMiddleware captures step.run() as OpenTelemetry spans
+  // extendedTracesMiddleware with behaviour: "off" since we have auto-instrumentations in telemetry.ts
+  // This still enables step-level tracing without duplicate HTTP/DB instrumentation
+  middleware: [realtimeMiddleware(), extendedTracesMiddleware({ behaviour: 'off' })],
 });

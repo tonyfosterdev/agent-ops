@@ -39,10 +39,17 @@
  */
 
 import { createState, type AgentMessageChunk } from '@inngest/agent-kit';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import { inngest } from '../inngest.js';
 import { createAgentNetwork } from '../network.js';
 import { AGENT_STREAM_TOPIC } from './realtime.js';
 import type { StreamingPublishFn } from '../tools/types.js';
+
+/**
+ * OpenTelemetry tracer for AgentKit operations.
+ * Used to create custom spans for network runs and other agent operations.
+ */
+const tracer = trace.getTracer('agentkit');
 
 /**
  * Main chat function that runs the agent network.
@@ -115,35 +122,64 @@ export const agentChat = inngest.createFunction(
       userId,
     });
 
-    // Run the agent network with streaming enabled
+    // Run the agent network with streaming enabled, wrapped in OpenTelemetry span
     // AgentKit now handles:
     // - Thread creation (if threadId missing) via history.createThread
     // - History loading via history.get
     // - User message persistence via history.appendUserMessage
     // - Result persistence via history.appendResults
-    const networkRun = await agentNetwork.run(userMessage.content, {
-      state: runState,
-      streaming: {
-        publish: async (chunk: AgentMessageChunk) => {
-          sequenceNumber += 1;
-          // Publish to the user's realtime channel
-          await publish({
-            channel: channelName,
-            topic: AGENT_STREAM_TOPIC,
-            data: {
-              ...chunk,
-              sequenceNumber,
-            },
-          });
+    const result = await tracer.startActiveSpan(
+      'agentkit.network.run',
+      {
+        attributes: {
+          'agentkit.thread_id': threadId ?? 'pending',
+          'agentkit.user_id': userId,
+          'agentkit.run_id': runId,
         },
       },
-    });
+      async (span) => {
+        try {
+          const networkRun = await agentNetwork.run(userMessage.content, {
+            state: runState,
+            streaming: {
+              publish: async (chunk: AgentMessageChunk) => {
+                sequenceNumber += 1;
+                // Publish to the user's realtime channel
+                await publish({
+                  channel: channelName,
+                  topic: AGENT_STREAM_TOPIC,
+                  data: {
+                    ...chunk,
+                    sequenceNumber,
+                  },
+                });
+              },
+            },
+          });
 
-    return {
-      success: true,
-      threadId: networkRun.state.threadId,
-      resultCount: networkRun.state.results.length,
-    };
+          // Add result attributes to span
+          span.setAttributes({
+            'agentkit.result_count': networkRun.state.results.length,
+            'agentkit.final_thread_id': networkRun.state.threadId ?? 'unknown',
+          });
+          span.setStatus({ code: SpanStatusCode.OK });
+
+          return {
+            success: true,
+            threadId: networkRun.state.threadId,
+            resultCount: networkRun.state.results.length,
+          };
+        } catch (error) {
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          span.recordException(error as Error);
+          throw error;
+        } finally {
+          span.end();
+        }
+      }
+    );
+
+    return result;
   }
 );
 

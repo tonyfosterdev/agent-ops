@@ -63,10 +63,17 @@ import { createNetwork, AgentResult } from '@inngest/agent-kit';
 import { anthropic } from '@inngest/agent-kit';
 import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import { createCodingAgent, createLogAnalyzer } from './agents/index.js';
 import type { FactoryContext } from './tools/types.js';
 import { config } from './config.js';
 import { historyAdapter, type StoredMessage } from './db/index.js';
+
+/**
+ * OpenTelemetry tracer for router operations.
+ * Used to create custom spans for LLM routing decisions.
+ */
+const tracer = trace.getTracer('agentkit');
 
 /**
  * Lazy-initialized Anthropic client for router LLM calls.
@@ -213,28 +220,38 @@ async function classifyIntentWithLLM(
   input: string,
   recentHistory?: Array<{ role: string; content: string; agentName?: string }>
 ): Promise<RoutingDecision> {
-  try {
-    const client = getRouterClient();
+  return tracer.startActiveSpan(
+    'agentkit.router.classify',
+    {
+      attributes: {
+        'agentkit.router.input_length': input.length,
+        'agentkit.router.has_history': !!recentHistory && recentHistory.length > 0,
+        'agentkit.router.history_count': recentHistory?.length ?? 0,
+      },
+    },
+    async (span): Promise<RoutingDecision> => {
+      try {
+        const client = getRouterClient();
 
-    // Build context from recent history if available
-    let historyContext = '';
-    if (recentHistory && recentHistory.length > 0) {
-      const historyLines = recentHistory.slice(-4).map((msg) => {
-        const prefix = msg.role === 'user' ? 'User' : `Agent (${msg.agentName || 'unknown'})`;
-        // Truncate long messages
-        const content = typeof msg.content === 'string'
-          ? msg.content.slice(0, 200)
-          : JSON.stringify(msg.content).slice(0, 200);
-        return `${prefix}: ${content}`;
-      });
-      historyContext = `\n\nRecent conversation context:\n${historyLines.join('\n')}\n\nCurrent message to classify:`;
-    }
+        // Build context from recent history if available
+        let historyContext = '';
+        if (recentHistory && recentHistory.length > 0) {
+          const historyLines = recentHistory.slice(-4).map((msg) => {
+            const prefix = msg.role === 'user' ? 'User' : `Agent (${msg.agentName || 'unknown'})`;
+            // Truncate long messages
+            const content = typeof msg.content === 'string'
+              ? msg.content.slice(0, 200)
+              : JSON.stringify(msg.content).slice(0, 200);
+            return `${prefix}: ${content}`;
+          });
+          historyContext = `\n\nRecent conversation context:\n${historyLines.join('\n')}\n\nCurrent message to classify:`;
+        }
 
-    // Use structured messages to prevent prompt injection
-    const response = await client.messages.create({
-      model: 'claude-3-5-haiku-20241022',
-      max_tokens: 150,
-      system: `You are a routing classifier. Analyze the user's message and determine their intent.
+        // Use structured messages to prevent prompt injection
+        const response = await client.messages.create({
+          model: 'claude-3-5-haiku-20241022',
+          max_tokens: 150,
+          system: `You are a routing classifier. Analyze the user's message and determine their intent.
 
 Return ONLY valid JSON in this exact format:
 {"agent": "log-analyzer" | "coding" | "unclear", "confidence": 0.0-1.0, "reason": "brief explanation"}
@@ -251,38 +268,65 @@ Examples:
 - "Fix the authentication bug" -> {"agent": "coding", "confidence": 0.95, "reason": "explicit fix request"}
 - "Fix it" or "Please fix the error" (after error was found) -> {"agent": "coding", "confidence": 0.9, "reason": "follow-up fix request"}
 - "The API is broken" (no prior context) -> {"agent": "unclear", "confidence": 0.4, "reason": "could be log investigation or code fix"}`,
-      messages: [
-        {
-          role: 'user',
-          content: historyContext + input,
-        },
-      ],
-    });
+          messages: [
+            {
+              role: 'user',
+              content: historyContext + input,
+            },
+          ],
+        });
 
-    // Extract text content from response
-    const textContent = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map((block) => block.text)
-      .join('');
+        // Extract text content from response
+        const textContent = response.content
+          .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+          .map((block) => block.text)
+          .join('');
 
-    // Parse JSON from response
-    const jsonMatch = textContent.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.warn('[router] Could not extract JSON from LLM response:', textContent);
-      return { agent: 'log-analyzer', confidence: 0.5, reason: 'parse_error_fallback' };
+        // Parse JSON from response
+        const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          console.warn('[router] Could not extract JSON from LLM response:', textContent);
+          span.setAttributes({
+            'agentkit.router.agent': 'log-analyzer',
+            'agentkit.router.confidence': 0.5,
+            'agentkit.router.fallback_reason': 'parse_error',
+          });
+          span.setStatus({ code: SpanStatusCode.OK });
+          span.end();
+          return { agent: 'log-analyzer', confidence: 0.5, reason: 'parse_error_fallback' };
+        }
+
+        const parsed = routingDecisionSchema.safeParse(JSON.parse(jsonMatch[0]));
+        if (!parsed.success) {
+          console.warn('[router] Invalid LLM response schema:', parsed.error.message);
+          span.setAttributes({
+            'agentkit.router.agent': 'log-analyzer',
+            'agentkit.router.confidence': 0.5,
+            'agentkit.router.fallback_reason': 'schema_error',
+          });
+          span.setStatus({ code: SpanStatusCode.OK });
+          span.end();
+          return { agent: 'log-analyzer', confidence: 0.5, reason: 'schema_error_fallback' };
+        }
+
+        // Record successful routing decision
+        span.setAttributes({
+          'agentkit.router.agent': parsed.data.agent,
+          'agentkit.router.confidence': parsed.data.confidence,
+          'agentkit.router.reason': parsed.data.reason,
+        });
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.end();
+        return parsed.data;
+      } catch (error) {
+        console.error('[router] LLM classification failed:', error);
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        span.recordException(error as Error);
+        span.end();
+        return { agent: 'log-analyzer', confidence: 0.5, reason: 'api_error_fallback' };
+      }
     }
-
-    const parsed = routingDecisionSchema.safeParse(JSON.parse(jsonMatch[0]));
-    if (!parsed.success) {
-      console.warn('[router] Invalid LLM response schema:', parsed.error.message);
-      return { agent: 'log-analyzer', confidence: 0.5, reason: 'schema_error_fallback' };
-    }
-
-    return parsed.data;
-  } catch (error) {
-    console.error('[router] LLM classification failed:', error);
-    return { agent: 'log-analyzer', confidence: 0.5, reason: 'api_error_fallback' };
-  }
+  );
 }
 
 /**
