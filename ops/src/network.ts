@@ -205,10 +205,30 @@ function userConfirmsHandoff(input: string): boolean {
  * on any errors for safety (read-only operations).
  *
  * Uses a small, fast model (claude-3.5-haiku) for quick routing decisions.
+ *
+ * @param input - The current user message
+ * @param recentHistory - Optional recent conversation history for context
  */
-async function classifyIntentWithLLM(input: string): Promise<RoutingDecision> {
+async function classifyIntentWithLLM(
+  input: string,
+  recentHistory?: Array<{ role: string; content: string; agentName?: string }>
+): Promise<RoutingDecision> {
   try {
     const client = getRouterClient();
+
+    // Build context from recent history if available
+    let historyContext = '';
+    if (recentHistory && recentHistory.length > 0) {
+      const historyLines = recentHistory.slice(-4).map((msg) => {
+        const prefix = msg.role === 'user' ? 'User' : `Agent (${msg.agentName || 'unknown'})`;
+        // Truncate long messages
+        const content = typeof msg.content === 'string'
+          ? msg.content.slice(0, 200)
+          : JSON.stringify(msg.content).slice(0, 200);
+        return `${prefix}: ${content}`;
+      });
+      historyContext = `\n\nRecent conversation context:\n${historyLines.join('\n')}\n\nCurrent message to classify:`;
+    }
 
     // Use structured messages to prevent prompt injection
     const response = await client.messages.create({
@@ -224,14 +244,17 @@ Categories:
 - coding: Requests to fix code, modify files, implement features, write code
 - unclear: Genuinely ambiguous, could be either, need more context
 
+IMPORTANT: Consider the conversation context when classifying. If the user says "fix it" or "fix the error" after an error was just identified, route to coding agent.
+
 Examples:
 - "What's causing the 500 errors?" -> {"agent": "log-analyzer", "confidence": 0.9, "reason": "investigating errors"}
 - "Fix the authentication bug" -> {"agent": "coding", "confidence": 0.95, "reason": "explicit fix request"}
-- "The API is broken" -> {"agent": "unclear", "confidence": 0.4, "reason": "could be log investigation or code fix"}`,
+- "Fix it" or "Please fix the error" (after error was found) -> {"agent": "coding", "confidence": 0.9, "reason": "follow-up fix request"}
+- "The API is broken" (no prior context) -> {"agent": "unclear", "confidence": 0.4, "reason": "could be log investigation or code fix"}`,
       messages: [
         {
           role: 'user',
-          content: input,
+          content: historyContext + input,
         },
       ],
     });
@@ -432,7 +455,24 @@ export function createAgentNetwork({ publish }: FactoryContext) {
 
       // Priority 5: LLM classification for all initial routing
       console.log('[router] Classifying intent with LLM');
-      const routingDecision = await classifyIntentWithLLM(input);
+
+      // Get recent history for context-aware routing
+      let recentHistory: Array<{ role: string; content: string; agentName?: string }> | undefined;
+      const threadId = state.get('threadId') as string | undefined;
+      if (threadId) {
+        try {
+          const messages = await historyAdapter.getRecentMessages(threadId, 4);
+          recentHistory = messages.map((msg) => ({
+            role: msg.role,
+            content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+            agentName: msg.agentName || undefined,
+          }));
+        } catch (err) {
+          console.warn('[router] Failed to load history for routing:', err);
+        }
+      }
+
+      const routingDecision = await classifyIntentWithLLM(input, recentHistory);
       console.log('[router] LLM decision:', JSON.stringify(routingDecision));
 
       // Handle low confidence or unclear intent

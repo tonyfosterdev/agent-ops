@@ -140,7 +140,7 @@ app.on(['GET', 'POST', 'PUT'], '/api/inngest', (c) => {
 app.post('/api/chat', async (c) => {
   try {
     const body = await c.req.json();
-    const { userMessage, threadId, userId, channelKey, history } = body as {
+    const { userMessage, threadId: clientThreadId, userId, channelKey, history } = body as {
       userMessage: { id: string; content: string; role: 'user' };
       threadId?: string;
       userId: string;
@@ -163,8 +163,15 @@ app.post('/api/chat', async (c) => {
     }
 
     // Validate threadId if provided
-    if (threadId && !isValidUUID(threadId)) {
+    if (clientThreadId && !isValidUUID(clientThreadId)) {
       return c.json({ error: 'threadId must be a valid UUID' }, 400);
+    }
+
+    // Create threadId synchronously if not provided
+    // This ensures the client gets the actual threadId immediately for subsequent messages
+    let threadId = clientThreadId;
+    if (!threadId) {
+      threadId = await historyAdapter.createThread(userId);
     }
 
     // Send event to Inngest for durable execution
@@ -181,7 +188,7 @@ app.post('/api/chat', async (c) => {
 
     return c.json({
       success: true,
-      threadId: threadId || 'pending', // Thread will be created by the function if not provided
+      threadId, // Always return the actual threadId
     });
   } catch (error) {
     console.error('Failed to send chat event:', error);
@@ -377,7 +384,27 @@ app.post('/threads', async (c) => {
 });
 
 /**
- * List threads for a user.
+ * List threads for a user (useAgents format).
+ * Gets userId from query parameter.
+ */
+app.get('/api/threads', async (c) => {
+  try {
+    const userId = c.req.query('userId');
+    if (!userId) {
+      return c.json({ error: 'userId query parameter is required' }, 400);
+    }
+    const limit = Number(c.req.query('limit')) || 50;
+
+    const threads = await historyAdapter.listThreads(userId, limit);
+    return c.json({ threads });
+  } catch (error) {
+    console.error('Failed to list threads:', error);
+    return c.json({ error: 'Failed to list threads' }, 500);
+  }
+});
+
+/**
+ * List threads for a user (legacy format with userId in path).
  */
 app.get('/api/threads/:userId', async (c) => {
   try {
@@ -389,6 +416,49 @@ app.get('/api/threads/:userId', async (c) => {
   } catch (error) {
     console.error('Failed to list threads:', error);
     return c.json({ error: 'Failed to list threads' }, 500);
+  }
+});
+
+/**
+ * Get history for a thread (useAgents format).
+ */
+app.get('/api/threads/:threadId/history', async (c) => {
+  try {
+    const threadId = c.req.param('threadId');
+    if (!isValidUUID(threadId)) {
+      return c.json({ error: 'threadId must be a valid UUID' }, 400);
+    }
+    const limit = c.req.query('limit');
+
+    let messages;
+    if (limit) {
+      messages = await historyAdapter.getRecentMessages(threadId, Number(limit));
+    } else {
+      messages = await historyAdapter.get(threadId);
+    }
+
+    return c.json({ messages });
+  } catch (error) {
+    console.error('Failed to get thread history:', error);
+    return c.json({ error: 'Failed to get thread history' }, 500);
+  }
+});
+
+/**
+ * Delete a thread (useAgents format).
+ */
+app.delete('/api/threads/:threadId', async (c) => {
+  try {
+    const threadId = c.req.param('threadId');
+    if (!isValidUUID(threadId)) {
+      return c.json({ error: 'threadId must be a valid UUID' }, 400);
+    }
+
+    await historyAdapter.deleteThread(threadId);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Failed to delete thread:', error);
+    return c.json({ error: 'Failed to delete thread' }, 500);
   }
 });
 
