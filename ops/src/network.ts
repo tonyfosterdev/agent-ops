@@ -92,15 +92,39 @@ const ROUTING_CONFIDENCE_THRESHOLD = parseFloat(process.env.ROUTING_CONFIDENCE_T
 /**
  * Convert stored messages to AgentResult[] format for AgentKit history.
  *
- * Groups consecutive assistant messages from the same agent into single AgentResult objects.
- * User messages are handled separately via appendUserMessage.
+ * Includes both user and assistant/tool messages to preserve full conversation
+ * context. User messages are represented as AgentResult objects with 'user' role
+ * output so the LLM can see the complete conversation flow.
  */
 function convertToAgentResults(messages: StoredMessage[]): AgentResult[] {
   const results: AgentResult[] = [];
 
   for (const msg of messages) {
-    // Skip user messages - they're handled separately
-    if (msg.role === 'user') continue;
+    // Include user messages as AgentResult with user-role output
+    // This preserves conversation context so the LLM knows what the user asked
+    if (msg.role === 'user') {
+      const userMessage = {
+        type: 'text' as const,
+        role: 'user' as const,
+        content: typeof msg.content === 'string'
+          ? msg.content
+          : JSON.stringify(msg.content),
+      };
+
+      results.push(
+        new AgentResult(
+          'user',
+          [userMessage],
+          [],
+          msg.createdAt,
+          undefined,
+          undefined,
+          undefined,
+          msg.id
+        )
+      );
+      continue;
+    }
 
     // Create an AgentResult for each assistant/tool message
     // In the future, we could group consecutive messages from the same agent
@@ -263,7 +287,7 @@ export function createAgentNetwork({ publish }: FactoryContext) {
     }),
 
     // Limit iterations to prevent runaway execution
-    maxIter: 15,
+    maxIter: 5,
 
     /**
      * History configuration for thread and message persistence.
@@ -357,6 +381,25 @@ export function createAgentNetwork({ publish }: FactoryContext) {
         state.delete('currentAgent');
         return undefined;
       }
+
+      // Loop detection: Track iterations without progress
+      // If agent hasn't called complete_task for 3 iterations, force completion
+      const iterWithoutProgress = (state.get('iter_without_progress') as number) || 0;
+
+      if (iterWithoutProgress >= 3) {
+        console.warn('[router] Loop detected: forcing completion after', iterWithoutProgress, 'iterations without progress');
+        state.set('complete', true);
+        state.set('completion_type', 'forced_loop_detection');
+        state.set('task_summary', {
+          summary: 'Task was terminated after 3 iterations without progress. The agent may not have finished its work.',
+          success: false,
+          details: { reason: 'loop_detected', iterations: iterWithoutProgress },
+        });
+        state.delete('currentAgent');
+        return undefined;
+      }
+
+      state.set('iter_without_progress', iterWithoutProgress + 1);
 
       // Priority 2: User confirmed handoff from previous suggestion
       const handoffSuggested = state.get('handoff_suggested') as string | undefined;

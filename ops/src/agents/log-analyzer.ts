@@ -66,15 +66,19 @@ export function createLogAnalyzer(_context: FactoryContext) {
       if (needsClarification) {
         // Clear the flag so we don't keep asking
         network?.state.kv.delete('needs_clarification');
-        clarificationPrefix = `IMPORTANT: The user's request is ambiguous. Before proceeding, ask them for clarification:
+        clarificationPrefix = `IMPORTANT: The user's request is ambiguous.
 
-"I want to make sure I help you correctly. Are you looking to:
-- Check the logs to see what errors are occurring?
-- Look at the code to understand or fix something?
+You MUST:
+1. Ask for clarification with this message:
+   "I want to make sure I help you correctly. Are you looking to:
+   - Check the logs to see what errors are occurring?
+   - Look at the code to understand or fix something?
 
-Please let me know so I can use the right approach."
+   Please let me know so I can use the right approach."
 
-After they clarify, proceed with the appropriate investigation.
+2. Immediately call complete_task - do NOT wait for their response
+
+The user will respond in their next message. Do NOT loop or continue processing.
 
 `;
       }

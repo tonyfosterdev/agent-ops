@@ -71,6 +71,9 @@ export const reportFindingsTool = createTool({
     // Store findings in network state for other agents to access
     network.state.kv.set('log_findings', findings);
 
+    // Reset loop detection counter - storing findings represents meaningful progress
+    network.state.kv.delete('iter_without_progress');
+
     // NOTE: We no longer auto-route to coding agent.
     // The agent should ask the user, and the user's response
     // will trigger routing via the LLM router.
@@ -118,7 +121,11 @@ export const completeTaskTool = createTool({
 
     // Signal completion to the network
     network.state.kv.set('complete', true);
+    network.state.kv.set('completion_type', 'agent_completed');
     network.state.kv.set('task_summary', { summary, success, details });
+
+    // Reset loop detection counter since task completed successfully
+    network.state.kv.delete('iter_without_progress');
 
     return {
       complete: true,
