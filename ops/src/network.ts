@@ -63,11 +63,51 @@ import { createNetwork, AgentResult } from '@inngest/agent-kit';
 import { anthropic } from '@inngest/agent-kit';
 import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
-import { trace, SpanStatusCode } from '@opentelemetry/api';
+import { trace, SpanStatusCode, type Span } from '@opentelemetry/api';
 import { createCodingAgent, createLogAnalyzer } from './agents/index.js';
 import type { FactoryContext } from './tools/types.js';
 import { config } from './config.js';
 import { historyAdapter, type StoredMessage } from './db/index.js';
+
+/**
+ * Active agent span tracking.
+ * Maps threadId to the currently active agent span.
+ * Used to track agent execution duration across router calls.
+ */
+const activeAgentSpans = new Map<string, Span>();
+
+/**
+ * End the active agent span for a thread if one exists.
+ * Called when switching agents or completing the network run.
+ */
+function endActiveAgentSpan(threadId: string, status: 'ok' | 'error' = 'ok'): void {
+  const span = activeAgentSpans.get(threadId);
+  if (span) {
+    span.setStatus({ code: status === 'ok' ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+    span.end();
+    activeAgentSpans.delete(threadId);
+  }
+}
+
+/**
+ * Start a new agent execution span.
+ * Ends any existing span for the thread first.
+ */
+function startAgentSpan(threadId: string, agentName: string, routingReason?: string): void {
+  // End previous agent span if any
+  endActiveAgentSpan(threadId);
+
+  // Start new span for this agent
+  const span = tracer.startSpan(`agentkit.agent.${agentName}`, {
+    attributes: {
+      'agentkit.agent.name': agentName,
+      'agentkit.thread_id': threadId,
+      'agentkit.routing.reason': routingReason || 'unknown',
+    },
+  });
+
+  activeAgentSpans.set(threadId, span);
+}
 
 /**
  * OpenTelemetry tracer for router operations.
@@ -441,10 +481,12 @@ export function createAgentNetwork({ publish }: FactoryContext) {
      */
     router: async ({ network, input, lastResult }) => {
       const state = network.state.kv;
+      const threadId = (state.get('threadId') as string) || 'unknown';
 
       // Priority 1: Check if work is complete - return undefined to stop the network
       if (state.get('complete')) {
         console.log('[router] Task complete, stopping network');
+        endActiveAgentSpan(threadId); // End any active agent span
         state.delete('currentAgent');
         return undefined;
       }
@@ -455,6 +497,7 @@ export function createAgentNetwork({ publish }: FactoryContext) {
 
       if (iterWithoutProgress >= 3) {
         console.warn('[router] Loop detected: forcing completion after', iterWithoutProgress, 'iterations without progress');
+        endActiveAgentSpan(threadId, 'error'); // End with error status
         state.set('complete', true);
         state.set('completion_type', 'forced_loop_detection');
         state.set('task_summary', {
@@ -474,6 +517,7 @@ export function createAgentNetwork({ publish }: FactoryContext) {
         state.delete('handoff_suggested');
         state.set('currentAgent', handoffSuggested);
         console.log('[router] User confirmed handoff to:', handoffSuggested);
+        startAgentSpan(threadId, handoffSuggested, 'user_confirmed_handoff');
         return handoffSuggested === 'coding' ? codingAgent : logAnalyzer;
       }
       // Clear stale handoff suggestion if user didn't confirm
@@ -487,10 +531,12 @@ export function createAgentNetwork({ publish }: FactoryContext) {
         state.delete('route_to');
         state.set('currentAgent', nextAgent);
         console.log('[router] Agent requested handoff to:', nextAgent);
+        startAgentSpan(threadId, nextAgent, 'agent_requested_handoff');
         return nextAgent === 'coding' ? codingAgent : logAnalyzer;
       }
 
       // Priority 4: Sticky behavior - if an agent is already running, keep using it
+      // Note: Don't start a new span here - the agent is already running with an active span
       const currentAgent = state.get('currentAgent') as string | undefined;
       if (currentAgent && lastResult) {
         console.log('[router] Sticky: continuing with', currentAgent);
@@ -502,10 +548,10 @@ export function createAgentNetwork({ publish }: FactoryContext) {
 
       // Get recent history for context-aware routing
       let recentHistory: Array<{ role: string; content: string; agentName?: string }> | undefined;
-      const threadId = state.get('threadId') as string | undefined;
-      if (threadId) {
+      const threadIdForHistory = state.get('threadId') as string | undefined;
+      if (threadIdForHistory) {
         try {
-          const messages = await historyAdapter.getRecentMessages(threadId, 4);
+          const messages = await historyAdapter.getRecentMessages(threadIdForHistory, 4);
           recentHistory = messages.map((msg) => ({
             role: msg.role,
             content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
@@ -524,12 +570,20 @@ export function createAgentNetwork({ publish }: FactoryContext) {
         console.log('[router] Low confidence, requesting clarification');
         state.set('needs_clarification', true);
         state.set('currentAgent', 'log-analyzer'); // Default to read-only agent
+        startAgentSpan(threadId, 'log-analyzer', `low_confidence: ${routingDecision.reason}`);
         return logAnalyzer;
       }
 
       state.set('currentAgent', routingDecision.agent);
+      startAgentSpan(threadId, routingDecision.agent, routingDecision.reason);
       return routingDecision.agent === 'coding' ? codingAgent : logAnalyzer;
     },
   });
 }
+
+/**
+ * Export function to end agent spans from external code (e.g., functions.ts)
+ * Called when the network run completes.
+ */
+export { endActiveAgentSpan };
 

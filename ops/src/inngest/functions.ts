@@ -41,7 +41,7 @@
 import { createState, type AgentMessageChunk } from '@inngest/agent-kit';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import { inngest } from '../inngest.js';
-import { createAgentNetwork } from '../network.js';
+import { createAgentNetwork, endActiveAgentSpan } from '../network.js';
 import { AGENT_STREAM_TOPIC } from './realtime.js';
 import type { StreamingPublishFn } from '../tools/types.js';
 
@@ -172,8 +172,12 @@ export const agentChat = inngest.createFunction(
         } catch (error) {
           span.setStatus({ code: SpanStatusCode.ERROR });
           span.recordException(error as Error);
+          // End agent span with error status on failure
+          endActiveAgentSpan(threadId || 'unknown', 'error');
           throw error;
         } finally {
+          // End any remaining agent span on completion
+          endActiveAgentSpan(threadId || 'unknown');
           span.end();
         }
       }
