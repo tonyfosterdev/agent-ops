@@ -44,7 +44,6 @@ export {
   createShellExecuteTool,
   createShellTools,
   shellToolMetadata,
-  type HitlPendingResult,
 } from './shell-tools';
 
 // File writing tools (HITL required) - factory pattern

@@ -19,6 +19,7 @@
 
 import { createTool } from '@inngest/agent-kit';
 import { z } from 'zod';
+import { STATE_KEYS } from '../constants/index';
 
 /**
  * Schema for log analysis findings.
@@ -41,8 +42,8 @@ const findingsSchema = z.object({
  * agents can access them. The findings will be available to the coding
  * agent if the user decides to proceed with code investigation.
  *
- * IMPORTANT: This tool no longer auto-routes to the coding agent.
- * Instead, the agent should:
+ * IMPORTANT: This tool does not auto-route to the coding agent.
+ * The agent should:
  * 1. Call this tool to store findings
  * 2. Present findings to the user
  * 3. Ask if they want to proceed to code investigation
@@ -54,12 +55,8 @@ export const reportFindingsTool = createTool({
     'Store log analysis findings for other agents to access. Does NOT automatically hand off - ask the user first.',
   parameters: z.object({
     findings: findingsSchema.describe('The findings from log analysis'),
-    handoffToCoding: z
-      .boolean()
-      .default(false)
-      .describe('Deprecated - no longer triggers automatic handoff. Ask the user instead.'),
   }),
-  handler: async ({ findings, handoffToCoding }, { network }) => {
+  handler: async ({ findings }, { network }) => {
     if (!network) {
       return {
         error: 'Network context not available',
@@ -69,24 +66,15 @@ export const reportFindingsTool = createTool({
     }
 
     // Store findings in network state for other agents to access
-    network.state.kv.set('log_findings', findings);
+    network.state.kv.set(STATE_KEYS.LOG_FINDINGS, findings);
 
     // Reset loop detection counter - storing findings represents meaningful progress
-    network.state.kv.delete('iter_without_progress');
-
-    // NOTE: We no longer auto-route to coding agent.
-    // The agent should ask the user, and the user's response
-    // will trigger routing via the LLM router.
-
-    // If handoffToCoding was requested, remind the agent to ask the user
-    const message = handoffToCoding
-      ? 'Findings stored. Ask the user if they want to proceed with code investigation.'
-      : 'Findings stored.';
+    network.state.kv.delete(STATE_KEYS.ITER_WITHOUT_PROGRESS);
 
     return {
       success: true,
-      stored: 'log_findings',
-      message,
+      stored: STATE_KEYS.LOG_FINDINGS,
+      message: 'Findings stored.',
       findings,
     };
   },
@@ -120,12 +108,12 @@ export const completeTaskTool = createTool({
     }
 
     // Signal completion to the network
-    network.state.kv.set('complete', true);
-    network.state.kv.set('completion_type', 'agent_completed');
-    network.state.kv.set('task_summary', { summary, success, details });
+    network.state.kv.set(STATE_KEYS.COMPLETE, true);
+    network.state.kv.set(STATE_KEYS.COMPLETION_TYPE, 'agent_completed');
+    network.state.kv.set(STATE_KEYS.TASK_SUMMARY, { summary, success, details });
 
     // Reset loop detection counter since task completed successfully
-    network.state.kv.delete('iter_without_progress');
+    network.state.kv.delete(STATE_KEYS.ITER_WITHOUT_PROGRESS);
 
     return {
       complete: true,

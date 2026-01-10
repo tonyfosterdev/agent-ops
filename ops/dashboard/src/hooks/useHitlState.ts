@@ -176,7 +176,6 @@ function isValidHitlResolvedData(data: unknown): data is HitlResolvedEventData {
  * @returns Object containing:
  * - hitlRequests: Map of toolCallId -> HitlRequest
  * - handleEvent: Callback to pass to useAgents onEvent
- * - clearResolved: Function to remove resolved requests from state
  */
 export function useHitlState() {
   const [hitlRequests, setHitlRequests] = useState<Map<string, HitlRequest>>(
@@ -259,29 +258,5 @@ export function useHitlState() {
     }
   }, []);
 
-  /**
-   * Manually clear resolved (approved/denied) requests from state.
-   * Useful for cleanup after a conversation ends or when starting a new thread.
-   */
-  const clearResolved = useCallback(() => {
-    setHitlRequests((prev) => {
-      const next = new Map(prev);
-      for (const [id, req] of next) {
-        if (req.status !== 'pending') {
-          next.delete(id);
-        }
-      }
-      return next;
-    });
-  }, []);
-
-  /**
-   * Clear all HITL requests (both pending and resolved).
-   * Useful when starting a completely new conversation.
-   */
-  const clearAll = useCallback(() => {
-    setHitlRequests(new Map());
-  }, []);
-
-  return { hitlRequests, handleEvent, clearResolved, clearAll };
+  return { hitlRequests, handleEvent };
 }

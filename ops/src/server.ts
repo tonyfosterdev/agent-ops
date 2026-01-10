@@ -24,8 +24,11 @@
  *
  * ### Thread Management
  * - POST /api/threads - Create a new conversation thread
- * - GET /api/threads/:userId - List threads for a user
+ * - GET /api/threads - List threads for a user (userId in query param)
+ * - GET /api/threads/:userId - List threads for a user (userId in path)
+ * - GET /api/threads/:threadId/history - Get history for a thread
  * - GET /api/thread/:threadId/messages - Get messages for a thread
+ * - DELETE /api/threads/:threadId - Delete a thread
  *
  * ### Operations
  * - GET /api/health - Health check endpoint
@@ -94,15 +97,6 @@ app.use(
 
 // Health check endpoint
 app.get('/api/health', (c) =>
-  c.json({
-    status: 'ok',
-    service: 'agent-server',
-    timestamp: new Date().toISOString(),
-  })
-);
-
-// Legacy health endpoint (without /api prefix)
-app.get('/health', (c) =>
   c.json({
     status: 'ok',
     service: 'agent-server',
@@ -310,63 +304,12 @@ app.post('/api/approve-tool', async (c) => {
   }
 });
 
-// Legacy approval endpoint (for backward compatibility)
-app.post('/approve', async (c) => {
-  try {
-    const body = await c.req.json();
-    const { runId, toolCallId, approved, feedback, threadId, userId } = body as {
-      runId: string;
-      toolCallId: string;
-      approved: boolean;
-      feedback?: string;
-      threadId: string;
-      userId: string;
-    };
-
-    if (!toolCallId) {
-      return c.json({ error: 'toolCallId is required' }, 400);
-    }
-    if (!isValidUUID(toolCallId)) {
-      return c.json({ error: 'toolCallId must be a valid UUID' }, 400);
-    }
-
-    // Send approval event to Inngest
-    await inngest.send({
-      name: 'agentops/tool.approval',
-      data: { toolCallId, approved, feedback },
-    });
-
-    return c.json({ ok: true });
-  } catch (error) {
-    console.error('Failed to send approval event:', error);
-    return c.json({ error: 'Failed to send approval event' }, 500);
-  }
-});
-
 // Thread Management Endpoints
 
 /**
  * Create a new conversation thread.
  */
 app.post('/api/threads', async (c) => {
-  try {
-    const body = await c.req.json();
-    const { userId, title } = body as { userId: string; title?: string };
-
-    if (!userId) {
-      return c.json({ error: 'userId is required' }, 400);
-    }
-
-    const threadId = await historyAdapter.createThread(userId, title);
-    return c.json({ threadId });
-  } catch (error) {
-    console.error('Failed to create thread:', error);
-    return c.json({ error: 'Failed to create thread' }, 500);
-  }
-});
-
-// Legacy thread creation endpoint
-app.post('/threads', async (c) => {
   try {
     const body = await c.req.json();
     const { userId, title } = body as { userId: string; title?: string };
@@ -462,20 +405,6 @@ app.delete('/api/threads/:threadId', async (c) => {
   }
 });
 
-// Legacy threads list endpoint
-app.get('/threads/:userId', async (c) => {
-  try {
-    const userId = c.req.param('userId');
-    const limit = Number(c.req.query('limit')) || 50;
-
-    const threads = await historyAdapter.listThreads(userId, limit);
-    return c.json({ threads });
-  } catch (error) {
-    console.error('Failed to list threads:', error);
-    return c.json({ error: 'Failed to list threads' }, 500);
-  }
-});
-
 /**
  * Get messages for a thread.
  */
@@ -495,98 +424,6 @@ app.get('/api/thread/:threadId/messages', async (c) => {
   } catch (error) {
     console.error('Failed to get messages:', error);
     return c.json({ error: 'Failed to get messages' }, 500);
-  }
-});
-
-// Legacy messages endpoint
-app.get('/thread/:threadId/messages', async (c) => {
-  try {
-    const threadId = c.req.param('threadId');
-    const limit = c.req.query('limit');
-
-    let messages;
-    if (limit) {
-      messages = await historyAdapter.getRecentMessages(threadId, Number(limit));
-    } else {
-      messages = await historyAdapter.get(threadId);
-    }
-
-    return c.json({ messages });
-  } catch (error) {
-    console.error('Failed to get messages:', error);
-    return c.json({ error: 'Failed to get messages' }, 500);
-  }
-});
-
-// Legacy chat endpoint
-app.post('/chat', async (c) => {
-  try {
-    const body = await c.req.json();
-    const { threadId, message, userId } = body as {
-      threadId: string;
-      message: string;
-      userId?: string;
-    };
-
-    if (!threadId) {
-      return c.json({ error: 'threadId is required' }, 400);
-    }
-    if (!isValidUUID(threadId)) {
-      return c.json({ error: 'threadId must be a valid UUID' }, 400);
-    }
-    if (!message) {
-      return c.json({ error: 'message is required' }, 400);
-    }
-    const messageValidation = isValidMessage(message);
-    if (!messageValidation.valid) {
-      return c.json({ error: messageValidation.reason }, 400);
-    }
-
-    // Convert to new format and send event
-    await inngest.send({
-      name: 'agent/chat.requested',
-      data: {
-        threadId,
-        userMessage: {
-          id: `msg-${Date.now()}`,
-          content: message,
-          role: 'user' as const,
-        },
-        userId: userId || 'legacy-user',
-        channelKey: userId || 'legacy-user',
-      },
-    });
-
-    return c.json({
-      ok: true,
-      eventIds: [], // Legacy format
-    });
-  } catch (error) {
-    console.error('Failed to send chat event:', error);
-    return c.json({ error: 'Failed to send chat event' }, 500);
-  }
-});
-
-// Legacy realtime token endpoint
-app.get('/realtime/token', async (c) => {
-  try {
-    const threadId = c.req.query('threadId');
-    const userId = c.req.query('userId');
-
-    if (!userId) {
-      return c.json({ error: 'userId is required' }, 400);
-    }
-
-    // Generate subscription token for the user's channel
-    const token = await getSubscriptionToken(inngest, {
-      channel: userChannel(userId),
-      topics: [AGENT_STREAM_TOPIC],
-    });
-
-    return c.json({ token });
-  } catch (error) {
-    console.error('Failed to generate subscription token:', error);
-    return c.json({ error: 'Failed to generate subscription token' }, 500);
   }
 });
 

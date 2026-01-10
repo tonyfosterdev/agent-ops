@@ -68,6 +68,8 @@ import { createCodingAgent, createLogAnalyzer } from './agents/index';
 import type { FactoryContext } from './tools/types';
 import { config } from './config';
 import { historyAdapter, type StoredMessage } from './db/index';
+import { ROUTER_SYSTEM_PROMPT } from './prompts/index';
+import { STATE_KEYS } from './constants/index';
 
 /**
  * Active agent span tracking.
@@ -291,23 +293,7 @@ async function classifyIntentWithLLM(
         const response = await client.messages.create({
           model: 'claude-3-5-haiku-20241022',
           max_tokens: 150,
-          system: `You are a routing classifier. Analyze the user's message and determine their intent.
-
-Return ONLY valid JSON in this exact format:
-{"agent": "log-analyzer" | "coding" | "unclear", "confidence": 0.0-1.0, "reason": "brief explanation"}
-
-Categories:
-- log-analyzer: Questions about errors, logs, what happened, checking status, investigating issues
-- coding: Requests to fix code, modify files, implement features, write code
-- unclear: Genuinely ambiguous, could be either, need more context
-
-IMPORTANT: Consider the conversation context when classifying. If the user says "fix it" or "fix the error" after an error was just identified, route to coding agent.
-
-Examples:
-- "What's causing the 500 errors?" -> {"agent": "log-analyzer", "confidence": 0.9, "reason": "investigating errors"}
-- "Fix the authentication bug" -> {"agent": "coding", "confidence": 0.95, "reason": "explicit fix request"}
-- "Fix it" or "Please fix the error" (after error was found) -> {"agent": "coding", "confidence": 0.9, "reason": "follow-up fix request"}
-- "The API is broken" (no prior context) -> {"agent": "unclear", "confidence": 0.4, "reason": "could be log investigation or code fix"}`,
+          system: ROUTER_SYSTEM_PROMPT,
           messages: [
             {
               role: 'user',
@@ -408,8 +394,8 @@ export function createAgentNetwork({ publish }: FactoryContext) {
        * Supports both server-generated and client-generated threadIds.
        */
       createThread: async ({ state }) => {
-        const userId = state.kv.get('userId') as string;
-        const clientThreadId = state.kv.get('threadId') as string | undefined;
+        const userId = state.kv.get(STATE_KEYS.USER_ID) as string;
+        const clientThreadId = state.kv.get(STATE_KEYS.THREAD_ID) as string | undefined;
 
         if (clientThreadId) {
           // Client-authoritative: ensure thread exists with client-provided ID
@@ -430,7 +416,7 @@ export function createAgentNetwork({ publish }: FactoryContext) {
         if (!threadId) return [];
 
         // Verify thread ownership
-        const userId = state.kv.get('userId') as string;
+        const userId = state.kv.get(STATE_KEYS.USER_ID) as string;
         const thread = await historyAdapter.getThread(threadId);
         if (!thread) {
           console.warn(`[history] Thread ${threadId} not found`);
@@ -481,55 +467,55 @@ export function createAgentNetwork({ publish }: FactoryContext) {
      */
     router: async ({ network, input, lastResult }) => {
       const state = network.state.kv;
-      const threadId = (state.get('threadId') as string) || 'unknown';
+      const threadId = (state.get(STATE_KEYS.THREAD_ID) as string) || 'unknown';
 
       // Priority 1: Check if work is complete - return undefined to stop the network
-      if (state.get('complete')) {
+      if (state.get(STATE_KEYS.COMPLETE)) {
         console.log('[router] Task complete, stopping network');
         endActiveAgentSpan(threadId); // End any active agent span
-        state.delete('currentAgent');
+        state.delete(STATE_KEYS.CURRENT_AGENT);
         return undefined;
       }
 
       // Loop detection: Track iterations without progress
       // If agent hasn't called complete_task for 3 iterations, force completion
-      const iterWithoutProgress = (state.get('iter_without_progress') as number) || 0;
+      const iterWithoutProgress = (state.get(STATE_KEYS.ITER_WITHOUT_PROGRESS) as number) || 0;
 
       if (iterWithoutProgress >= 3) {
         console.warn('[router] Loop detected: forcing completion after', iterWithoutProgress, 'iterations without progress');
         endActiveAgentSpan(threadId, 'error'); // End with error status
-        state.set('complete', true);
-        state.set('completion_type', 'forced_loop_detection');
-        state.set('task_summary', {
+        state.set(STATE_KEYS.COMPLETE, true);
+        state.set(STATE_KEYS.COMPLETION_TYPE, 'forced_loop_detection');
+        state.set(STATE_KEYS.TASK_SUMMARY, {
           summary: 'Task was terminated after 3 iterations without progress. The agent may not have finished its work.',
           success: false,
           details: { reason: 'loop_detected', iterations: iterWithoutProgress },
         });
-        state.delete('currentAgent');
+        state.delete(STATE_KEYS.CURRENT_AGENT);
         return undefined;
       }
 
-      state.set('iter_without_progress', iterWithoutProgress + 1);
+      state.set(STATE_KEYS.ITER_WITHOUT_PROGRESS, iterWithoutProgress + 1);
 
       // Priority 2: User confirmed handoff from previous suggestion
-      const handoffSuggested = state.get('handoff_suggested') as string | undefined;
+      const handoffSuggested = state.get(STATE_KEYS.HANDOFF_SUGGESTED) as string | undefined;
       if (handoffSuggested && userConfirmsHandoff(input)) {
-        state.delete('handoff_suggested');
-        state.set('currentAgent', handoffSuggested);
+        state.delete(STATE_KEYS.HANDOFF_SUGGESTED);
+        state.set(STATE_KEYS.CURRENT_AGENT, handoffSuggested);
         console.log('[router] User confirmed handoff to:', handoffSuggested);
         startAgentSpan(threadId, handoffSuggested, 'user_confirmed_handoff');
         return handoffSuggested === 'coding' ? codingAgent : logAnalyzer;
       }
       // Clear stale handoff suggestion if user didn't confirm
       if (handoffSuggested) {
-        state.delete('handoff_suggested');
+        state.delete(STATE_KEYS.HANDOFF_SUGGESTED);
       }
 
       // Priority 3: Check if an agent explicitly requested a handoff via state
-      const nextAgent = state.get('route_to') as string | undefined;
+      const nextAgent = state.get(STATE_KEYS.ROUTE_TO) as string | undefined;
       if (nextAgent) {
-        state.delete('route_to');
-        state.set('currentAgent', nextAgent);
+        state.delete(STATE_KEYS.ROUTE_TO);
+        state.set(STATE_KEYS.CURRENT_AGENT, nextAgent);
         console.log('[router] Agent requested handoff to:', nextAgent);
         startAgentSpan(threadId, nextAgent, 'agent_requested_handoff');
         return nextAgent === 'coding' ? codingAgent : logAnalyzer;
@@ -537,7 +523,7 @@ export function createAgentNetwork({ publish }: FactoryContext) {
 
       // Priority 4: Sticky behavior - if an agent is already running, keep using it
       // Note: Don't start a new span here - the agent is already running with an active span
-      const currentAgent = state.get('currentAgent') as string | undefined;
+      const currentAgent = state.get(STATE_KEYS.CURRENT_AGENT) as string | undefined;
       if (currentAgent && lastResult) {
         console.log('[router] Sticky: continuing with', currentAgent);
         return currentAgent === 'coding' ? codingAgent : logAnalyzer;
@@ -548,7 +534,7 @@ export function createAgentNetwork({ publish }: FactoryContext) {
 
       // Get recent history for context-aware routing
       let recentHistory: Array<{ role: string; content: string; agentName?: string }> | undefined;
-      const threadIdForHistory = state.get('threadId') as string | undefined;
+      const threadIdForHistory = state.get(STATE_KEYS.THREAD_ID) as string | undefined;
       if (threadIdForHistory) {
         try {
           const messages = await historyAdapter.getRecentMessages(threadIdForHistory, 4);
@@ -568,13 +554,13 @@ export function createAgentNetwork({ publish }: FactoryContext) {
       // Handle low confidence or unclear intent
       if (routingDecision.agent === 'unclear' || routingDecision.confidence < ROUTING_CONFIDENCE_THRESHOLD) {
         console.log('[router] Low confidence, requesting clarification');
-        state.set('needs_clarification', true);
-        state.set('currentAgent', 'log-analyzer'); // Default to read-only agent
+        state.set(STATE_KEYS.NEEDS_CLARIFICATION, true);
+        state.set(STATE_KEYS.CURRENT_AGENT, 'log-analyzer'); // Default to read-only agent
         startAgentSpan(threadId, 'log-analyzer', `low_confidence: ${routingDecision.reason}`);
         return logAnalyzer;
       }
 
-      state.set('currentAgent', routingDecision.agent);
+      state.set(STATE_KEYS.CURRENT_AGENT, routingDecision.agent);
       startAgentSpan(threadId, routingDecision.agent, routingDecision.reason);
       return routingDecision.agent === 'coding' ? codingAgent : logAnalyzer;
     },

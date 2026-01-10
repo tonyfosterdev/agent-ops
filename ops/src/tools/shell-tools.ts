@@ -41,20 +41,6 @@ import type { FactoryContext } from './types';
 import { createHitlRequestedEvent, createHitlResolvedEvent } from './types';
 
 /**
- * Result type for HITL tools that require approval.
- */
-export interface HitlPendingResult {
-  status: 'requires_approval';
-  toolCallId: string;
-  tool: string;
-  request: Record<string, unknown>;
-  metadata?: {
-    reason?: string;
-    riskLevel?: 'low' | 'medium' | 'high';
-  };
-}
-
-/**
  * Create a shell command execution tool.
  *
  * This tool is considered dangerous because shell commands can
