@@ -114,70 +114,145 @@ server.listen(3200);
 
 ### 2. Agent Network
 
-The network orchestrates **two agents** with a **hybrid router** (code rules first, built-in LLM router for fallback):
+The network orchestrates **two agents** with an **LLM-only router** that prioritizes correctness over speed:
 
 ```typescript
 // ops/src/network.ts
-import { createNetwork, getDefaultRoutingAgent } from '@inngest/agent-kit';
+import { createNetwork } from '@inngest/agent-kit';
+import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
+
+// Configurable threshold - below this, ask for clarification
+const CLARIFICATION_THRESHOLD = parseFloat(process.env.ROUTING_CONFIDENCE_THRESHOLD ?? '0.7');
+
+// Zod schema for validated LLM responses
+const routingDecisionSchema = z.object({
+  agent: z.enum(['log-analyzer', 'coding', 'unclear']),
+  confidence: z.number().min(0).max(1),
+  reason: z.string(),
+});
 
 export const opsNetwork = createNetwork({
   name: "ops-network",
-  agents: [logAnalyzerAgent, codingAgent],  // Only 2 agents - no custom "default"
+  agents: [logAnalyzerAgent, codingAgent],
   maxIter: 15,
   defaultModel: anthropic({ model: "claude-sonnet-4-20250514" }),
 
-  // HYBRID ROUTER: Code rules first, then AgentKit's built-in LLM routing
-  defaultRouter: ({ network, history }) => {
+  // LLM-ONLY ROUTER: All routing decisions use LLM classification
+  // Design principle: Correctness first, optimize for speed later
+  router: async ({ network, input, lastResult }) => {
     const state = network.state.kv;
-    const lastMessage = history[history.length - 1]?.content?.toLowerCase() || '';
 
-    // 1. Check if work is complete
+    // Priority 1: Check if work is complete
     if (state.get('complete')) {
-      return undefined; // Network done
+      state.delete('currentAgent');
+      return undefined;
     }
 
-    // 2. Code-based routing rules (deterministic)
-    if (lastMessage.includes('log') || lastMessage.includes('error') || lastMessage.includes('trace')) {
-      return logAnalyzerAgent;
+    // Priority 2: User confirmed handoff from previous suggestion
+    const handoffSuggested = state.get('handoff_suggested') as string | undefined;
+    if (handoffSuggested && userConfirmsHandoff(input)) {
+      state.delete('handoff_suggested');
+      state.set('currentAgent', handoffSuggested);
+      return handoffSuggested === 'coding' ? codingAgent : logAnalyzer;
     }
-    if (lastMessage.includes('code') || lastMessage.includes('fix') || lastMessage.includes('debug')) {
-      return codingAgent;
+    if (handoffSuggested) state.delete('handoff_suggested'); // Clear stale
+
+    // Priority 3: Explicit handoff via state (agent-requested)
+    const nextAgent = state.get('route_to') as string | undefined;
+    if (nextAgent) {
+      state.delete('route_to');
+      state.set('currentAgent', nextAgent);
+      return nextAgent === 'coding' ? codingAgent : logAnalyzer;
     }
 
-    // 3. Check if agent explicitly requested handoff via state
-    const nextAgent = state.get('route_to');
-    if (nextAgent === 'coding') return codingAgent;
-    if (nextAgent === 'log-analyzer') return logAnalyzerAgent;
+    // Priority 4: Sticky behavior - keep current agent if it has results
+    const currentAgent = state.get('currentAgent') as string | undefined;
+    if (currentAgent && lastResult) {
+      return currentAgent === 'coding' ? codingAgent : logAnalyzer;
+    }
 
-    // 4. Fallback to AgentKit's built-in LLM routing agent
-    // This uses the agent descriptions to intelligently select the next agent
-    return getDefaultRoutingAgent();
+    // Priority 5: LLM classification for ALL initial routing
+    const decision = await classifyIntentWithLLM(input);
+    if (decision.agent === 'unclear' || decision.confidence < CLARIFICATION_THRESHOLD) {
+      state.set('needs_clarification', true);
+      state.set('currentAgent', 'log-analyzer'); // Default to read-only
+      return logAnalyzer;
+    }
+
+    state.set('currentAgent', decision.agent);
+    return decision.agent === 'coding' ? codingAgent : logAnalyzer;
   },
 });
 ```
 
-**Hybrid Routing Logic**:
-| Priority | Condition | Next Agent | Rationale |
-|----------|-----------|------------|-----------|
-| 1 | `state.complete === true` | undefined (stop) | Task finished |
-| 2 | Message contains "log/error/trace" | log-analyzer | Keyword-based routing |
-| 3 | Message contains "code/fix/debug" | coding | Keyword-based routing |
-| 4 | `state.route_to === "coding"` | coding | Agent-requested handoff |
-| 5 | `state.route_to === "log-analyzer"` | log-analyzer | Agent-requested handoff |
-| 6 | **fallback** | **`getDefaultRoutingAgent()`** | AgentKit's built-in LLM routing |
+**Design Decision: LLM-Only Routing**
 
-**Note**: No custom "default" agent is needed. AgentKit provides `getDefaultRoutingAgent()` which:
-- Uses LLM inference to analyze the request and available agents
-- Has built-in `select_agent` and `done` tools
-- Reads agent descriptions to make intelligent routing decisions
+Keyword matching was considered but rejected:
+- **False positives**: "I got an error trying to fix the code" matches "fix the" → wrong agent
+- **Context blindness**: Keywords can't understand nuance or intent
+- **Maintenance burden**: Constantly updating keyword lists
+
+LLM classification understands intent, not just keywords. If latency becomes a problem, we can add keyword caching for proven patterns later.
+
+**Routing Priority**:
+| Priority | Condition | Action | Rationale |
+|----------|-----------|--------|-----------|
+| 1 | `state.complete === true` | Stop network | Task finished |
+| 2 | User confirms handoff ("yes", "ok") | Route to suggested agent | Explicit user consent |
+| 3 | Agent set `route_to` in state | Route to requested agent | Agent-requested handoff |
+| 4 | Sticky + has results | Continue current agent | Prevents mid-conversation switching |
+| 5 | LLM classification | Route based on intent | Correctness-first routing |
+| 6 | LLM uncertain / low confidence | log-analyzer + clarification | Ask user for intent |
+
+**LLM Intent Classification**:
+```typescript
+async function classifyIntentWithLLM(input: string): Promise<RoutingDecision> {
+  // Uses Claude 3.5 Haiku for fast classification
+  // Structured messages prevent prompt injection
+  // Zod schema validates response format
+  // Error handling falls back to log-analyzer (read-only = safer)
+}
+```
+
+**Clarification Handling**:
+When the router sets `needs_clarification: true`, the log-analyzer agent prepends a clarification request:
+```
+"I want to make sure I help you correctly. Are you looking to:
+- Check the logs to see what errors are occurring?
+- Look at the code to understand or fix something?"
+```
+
+**Environment Configuration**:
+- `ROUTING_CONFIDENCE_THRESHOLD` (default: 0.7) - Below this threshold, ask for clarification
+- `ANTHROPIC_API_KEY` - Required for LLM router
 
 ### 3. Agents
 
-**Only 2 custom agents** - AgentKit's built-in `getDefaultRoutingAgent()` handles LLM-based routing for ambiguous requests.
+Both agents follow a **conversational, answer-first pattern**: they investigate, ANSWER the user's question, then SUGGEST next actions and wait for user confirmation before taking action.
 
 #### Log Analyzer Agent
 
-**Purpose**: Query Loki logs, identify errors, extract stack traces, report findings.
+**Purpose**: Query Loki logs, identify errors, extract stack traces, and ANSWER questions about system behavior.
+
+**Conversational Behavior**:
+1. INVESTIGATE: Query logs to find relevant information
+2. ANSWER: Provide a clear, direct answer to the user's question
+3. SUGGEST: Offer next steps (e.g., "Would you like me to hand this to the coding agent?")
+4. WAIT: Do not hand off automatically - wait for user confirmation
+
+**Example Response**:
+```
+I found the error. The last error from store-api was:
+
+**Error:** TypeError: Cannot read property 'id' of undefined
+**Time:** 2 minutes ago
+**Location:** /app/dist/services/bookService.js:42
+
+**Would you like me to:**
+- Search for more context around this error?
+- Hand this off to the coding agent to investigate and fix the source code?
+```
 
 **Tools**:
 | Tool | Description |
@@ -187,30 +262,54 @@ export const opsNetwork = createNetwork({
 | `loki_service_errors` | Quick error lookup by service |
 | `read_file` | Read source files for context |
 | `search_code` | Grep codebase for patterns |
-| `report_findings` | Hand off to coding agent with details |
-| `complete_analysis` | Mark task complete (no issues found) |
+| `report_findings` | Store findings (no longer auto-routes) |
+| `complete_task` | Mark task complete |
 
 **State Mutations**:
-- `report_findings`: Sets `phase → "fix"`, `findings → {...}`
-- `complete_analysis`: Sets `phase → "complete"`
+- `report_findings`: Sets `log_findings → {...}` (user must confirm handoff)
+- `complete_task`: Sets `complete → true`
 
 #### Coding Agent
 
-**Purpose**: Read code, apply fixes, execute commands, restart services.
+**Purpose**: Read code, EXPLAIN issues, and apply fixes with user confirmation.
+
+**Conversational Behavior**:
+1. INVESTIGATE: Read relevant source files, search for patterns
+2. ANSWER: Explain what you found - the root cause, the relevant code
+3. SUGGEST: Offer to fix it ("Would you like me to remove this error?")
+4. WAIT: Only write code after user confirms they want the fix
+
+**Example Response**:
+```
+I found the issue. In `services/store-api/src/services/bookService.ts`:
+
+**Problem:** Line 12 has a deliberate error throw causing all book requests to fail.
+**Code:**
+```typescript
+async listBooks() {
+  throw new Error('Terrible error');  // <-- This is the problem
+}
+```
+
+**Would you like me to:**
+- Remove this error and fix the method?
+- Investigate further to understand why this was added?
+```
 
 **Tools**:
 | Tool | Safety | Description |
 |------|--------|-------------|
 | `read_file` | Safe | Read file contents |
-| `find_files` | Safe | Find files by pattern |
 | `search_code` | Safe | Regex search in codebase |
-| `write_file` | **DANGEROUS** | Overwrite file contents |
-| `shell_command` | **DANGEROUS** | Execute shell commands (allowlisted) |
-| `restart_service` | **DANGEROUS** | Restart Docker containers |
-| `complete_fix` | Safe | Mark task complete |
+| `write_file` | **DANGEROUS** | Overwrite file contents (requires approval) |
+| `shell_command` | **DANGEROUS** | Execute shell commands (requires approval) |
+| `docker_compose_restart` | **DANGEROUS** | Restart Docker containers (requires approval) |
+| `complete_task` | Safe | Mark task complete |
 
 **State Mutations**:
-- `complete_fix`: Sets `phase → "complete"`
+- `complete_task`: Sets `complete → true`
+
+**Important**: After docker_compose_restart succeeds, the agent completes immediately - no verification curl commands.
 
 ### 4. History Database
 
@@ -273,68 +372,91 @@ sdk.start();
 
 ## Data Flow
 
-### Standard Execution Flow
+### Conversational Execution Flow
+
+The system follows a **conversational pattern** where agents ANSWER questions first, then ASK before taking action:
 
 ```
 1. User submits prompt via Dashboard
          │
          ▼
-2. Dashboard POSTs to Agent Server
+2. Router classifies intent (keyword matching or LLM)
          │
-         ▼
-3. AgentKit creates Inngest function run
+         ├── Ambiguous → Set needs_clarification, route to log-analyzer
          │
-         ▼
-4. Router selects log-analyzer (callCount=0)
+         ├── Log keywords ("show me logs") → log-analyzer
          │
-         ▼
-5. Log analyzer queries Loki
-         │
-         ├── No errors found → complete_analysis() → phase="complete" → Stop
-         │
-         └── Errors found → report_findings({file, line, ...}) → phase="fix"
+         └── Code keywords ("fix the bug") → coding
                    │
                    ▼
-6. Router selects coding agent
+3. Agent investigates and ANSWERS the question
          │
          ▼
-7. Coding agent reads findings from state
+4. Agent SUGGESTS next actions
          │
          ▼
-8. Coding agent proposes fix (write_file)
+5. Run completes, user sees answer + suggestions
          │
          ▼
-9. HITL: Run suspends, waits for approval
+6. User responds with their choice (new message)
          │
-         ▼
-10. User approves via Dashboard
+         ├── "Yes, investigate the code" → Router detects confirmation
+         │                                  → Routes to coding agent
          │
-         ▼
-11. Tool executes, coding agent continues
-         │
-         ▼
-12. complete_fix() → phase="complete" → Stop
+         └── "No, search more logs" → Router continues with log-analyzer
 ```
 
-### State Flow Between Agents
+### Handoff Flow (User-Confirmed)
 
 ```
-┌────────────────────┐                    ┌────────────────────┐
-│    Log Analyzer    │                    │    Coding Agent    │
-│                    │                    │                    │
-│  1. Query logs     │                    │                    │
-│  2. Find error     │                    │                    │
-│  3. report_findings│───── state ──────► │  4. Read findings  │
-│     - file         │    kv.set()        │  5. Read file      │
-│     - line         │                    │  6. Write fix      │
-│     - errorType    │                    │  7. complete_fix   │
-│     - suggestion   │                    │                    │
-└────────────────────┘                    └────────────────────┘
+┌────────────────────┐         ┌──────────────┐         ┌────────────────────┐
+│    Log Analyzer    │         │     User     │         │    Coding Agent    │
+│                    │         │              │         │                    │
+│  1. Query logs     │         │              │         │                    │
+│  2. Find error     │         │              │         │                    │
+│  3. ANSWER:        │         │              │         │                    │
+│     "Found error   │         │              │         │                    │
+│      at line 42"   │────────►│  Sees answer │         │                    │
+│                    │         │              │         │                    │
+│  4. SUGGEST:       │         │              │         │                    │
+│     "Hand off to   │────────►│  Chooses     │         │                    │
+│      coding?"      │         │  option      │         │                    │
+│                    │         │              │         │                    │
+│  5. complete_task  │         │              │         │                    │
+│                    │         │   "Yes"      │─────────►│  6. Read findings │
+└────────────────────┘         └──────────────┘         │  7. Read file     │
+                                                        │  8. ANSWER:       │
+                                                        │     "Issue is..." │
+                                                        │  9. SUGGEST:      │
+                                                        │     "Fix it?"     │
+                                                        │                    │
+                                                        │  [User says yes]  │
+                                                        │  10. write_file   │
+                                                        │  11. restart svc  │
+                                                        │  12. complete     │
+                                                        └────────────────────┘
+```
 
+### State Keys
+
+```
 State Keys:
-  phase: "analyze" → "fix" → "complete"
-  findings: { file, line, errorType, errorMessage, suggestedAction }
+  complete: boolean              - Network stops when true
+  currentAgent: string           - Sticky routing (prevents mid-conversation switch)
+  handoff_suggested: string      - Agent suggested handoff, awaiting user confirmation
+  needs_clarification: boolean   - Router uncertain, agent should ask user
+  log_findings: object           - Findings from log-analyzer for coding agent context
+  route_to: string               - Explicit agent handoff (legacy, prefer suggestions)
 ```
+
+### Key Differences from Auto-Handoff
+
+| Old Behavior | New Behavior |
+|--------------|--------------|
+| Agent calls report_findings(handoffToCoding: true) | Agent stores findings, ASKS user |
+| Router auto-selects next agent | User confirms, THEN routing happens |
+| Agent immediately acts | Agent ANSWERS, then SUGGESTS action |
+| No clarification mechanism | Router asks user when uncertain |
 
 ---
 
