@@ -6,7 +6,7 @@
  */
 
 import postgres from 'postgres';
-import { config } from '../config.js';
+import { config } from '../config';
 
 /**
  * Column name transformer for converting snake_case to camelCase.

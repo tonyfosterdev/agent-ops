@@ -20,8 +20,8 @@
  * The network uses LLM-only routing for intent classification to ensure
  * correctness. All initial routing decisions go through Claude 3.5 Haiku.
  */
-export { createCodingAgent } from './coding.js';
-export { createLogAnalyzer } from './log-analyzer.js';
+export { createCodingAgent } from './coding';
+export { createLogAnalyzer } from './log-analyzer';
 
 // Re-export types
-export type { FactoryContext } from '../tools/types.js';
+export type { FactoryContext } from '../tools/types';

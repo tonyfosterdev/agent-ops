@@ -43,11 +43,11 @@ import { serve as serveHono } from '@hono/node-server';
 import { serve as serveInngest } from 'inngest/hono';
 import { cors } from 'hono/cors';
 import { getSubscriptionToken } from '@inngest/realtime';
-import { inngest } from './inngest.js';
-import { inngestFunctions, userChannel, AGENT_STREAM_TOPIC } from './inngest/index.js';
-import { historyAdapter } from './db/index.js';
-import { ensureSchema } from './db/postgres.js';
-import { config, validateConfig } from './config.js';
+import { inngest } from './inngest';
+import { inngestFunctions, userChannel, AGENT_STREAM_TOPIC } from './inngest/index';
+import { historyAdapter } from './db/index';
+import { ensureSchema } from './db/postgres';
+import { config, validateConfig } from './config';
 
 /**
  * Input Validation Helpers

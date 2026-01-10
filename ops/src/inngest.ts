@@ -14,7 +14,7 @@
 import { Inngest, EventSchemas } from 'inngest';
 import { realtimeMiddleware } from '@inngest/realtime/middleware';
 import { extendedTracesMiddleware } from 'inngest/experimental';
-import { config } from './config.js';
+import { config } from './config';
 
 /**
  * Custom event schemas for the AgentOps application.

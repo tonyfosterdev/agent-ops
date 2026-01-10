@@ -5,7 +5,7 @@
  * AgentKit conversation persistence.
  */
 
-export { sql, testConnection, closeConnection } from './postgres.js';
+export { sql, testConnection, closeConnection } from './postgres';
 export {
   historyAdapter,
   type MessageRole,
@@ -13,4 +13,4 @@ export {
   type HistoryMessage,
   type StoredMessage,
   type Thread,
-} from './history-adapter.js';
+} from './history-adapter';

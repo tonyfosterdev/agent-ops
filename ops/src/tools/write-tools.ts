@@ -26,9 +26,9 @@ import { z } from 'zod';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { validatePath } from './security.js';
-import type { FactoryContext } from './types.js';
-import { createHitlRequestedEvent, createHitlResolvedEvent } from './types.js';
+import { validatePath } from './security';
+import type { FactoryContext } from './types';
+import { createHitlRequestedEvent, createHitlResolvedEvent } from './types';
 
 /**
  * Create a write file tool.

@@ -33,14 +33,14 @@
  * - Never auto-handoff via report_findings(handoffToCoding: true)
  */
 import { createAgent } from '@inngest/agent-kit';
-import type { FactoryContext } from '../tools/types.js';
+import type { FactoryContext } from '../tools/types';
 import {
   lokiQueryTool,
   lokiLabelsTool,
   lokiLabelValuesTool,
   reportFindingsTool,
   completeTaskTool,
-} from '../tools/index.js';
+} from '../tools/index';
 
 /**
  * Create a log analyzer agent.

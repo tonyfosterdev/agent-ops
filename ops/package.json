@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "description": "Durable ops agent framework with Inngest AgentKit",
   "type": "module",
-  "main": "dist/server.js",
+  "main": "src/server.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --noEmit",
     "dev": "tsx watch src/server.ts",
     "dev:server": "tsx watch src/server.ts",
-    "start": "node --import ./dist/telemetry.js ./dist/server.js",
+    "start": "tsx --import ./src/telemetry.ts ./src/server.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -75,7 +75,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { sql } from './postgres.js';
+import { sql } from './postgres';
 
 /**
  * Message role types following AgentKit conventions.

@@ -49,9 +49,9 @@ import {
   ALLOWED_SERVICES,
   getComposeFilePath,
   getComposeProjectName,
-} from './security.js';
-import type { FactoryContext } from './types.js';
-import { createHitlRequestedEvent, createHitlResolvedEvent } from './types.js';
+} from './security';
+import type { FactoryContext } from './types';
+import { createHitlRequestedEvent, createHitlResolvedEvent } from './types';
 
 /**
  * Maximum number of lines to return from docker output.

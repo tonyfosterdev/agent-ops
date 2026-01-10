@@ -40,10 +40,10 @@
 
 import { createState, type AgentMessageChunk } from '@inngest/agent-kit';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
-import { inngest } from '../inngest.js';
-import { createAgentNetwork, endActiveAgentSpan } from '../network.js';
-import { AGENT_STREAM_TOPIC } from './realtime.js';
-import type { StreamingPublishFn } from '../tools/types.js';
+import { inngest } from '../inngest';
+import { createAgentNetwork, endActiveAgentSpan } from '../network';
+import { AGENT_STREAM_TOPIC } from './realtime';
+import type { StreamingPublishFn } from '../tools/types';
 
 /**
  * OpenTelemetry tracer for AgentKit operations.

@@ -28,8 +28,8 @@
  */
 
 // Shared types for factory pattern
-export type { FactoryContext, StreamingPublishFn } from './types.js';
-export { createHitlRequestedEvent } from './types.js';
+export type { FactoryContext, StreamingPublishFn } from './types';
+export { createHitlRequestedEvent } from './types';
 
 // File operation tools (read-only, no HITL)
 export {
@@ -37,7 +37,7 @@ export {
   findFilesTool,
   searchCodeTool,
   fileTools,
-} from './file-tools.js';
+} from './file-tools';
 
 // Shell execution tools (HITL required) - factory pattern
 export {
@@ -45,7 +45,7 @@ export {
   createShellTools,
   shellToolMetadata,
   type HitlPendingResult,
-} from './shell-tools.js';
+} from './shell-tools';
 
 // File writing tools (HITL required) - factory pattern
 export {
@@ -53,14 +53,14 @@ export {
   createAppendFileTool,
   createWriteTools,
   writeToolMetadata,
-} from './write-tools.js';
+} from './write-tools';
 
 // Docker Compose tools (HITL required) - factory pattern
 export {
   createDockerComposeRestartTool,
   createDockerTools,
   dockerToolMetadata,
-} from './docker-tools.js';
+} from './docker-tools';
 
 // Loki log query tools (read-only, no HITL)
 export {
@@ -68,14 +68,14 @@ export {
   lokiLabelsTool,
   lokiLabelValuesTool,
   lokiTools,
-} from './loki-tools.js';
+} from './loki-tools';
 
 // State mutation tools (no HITL - these modify network state, not system state)
 export {
   reportFindingsTool,
   completeTaskTool,
   stateTools,
-} from './state-tools.js';
+} from './state-tools';
 
 // Security utilities for defense-in-depth validation
 export {
@@ -89,19 +89,19 @@ export {
   type ValidationResult,
   type PathValidationResult,
   type AllowedService,
-} from './security.js';
+} from './security';
 
 // Import for aggregation
-import { fileTools as _fileTools } from './file-tools.js';
-import { shellToolMetadata as _shellMeta } from './shell-tools.js';
-import { writeToolMetadata as _writeMeta } from './write-tools.js';
-import { dockerToolMetadata as _dockerMeta } from './docker-tools.js';
-import { lokiTools as _lokiTools } from './loki-tools.js';
-import { stateTools as _stateTools } from './state-tools.js';
-import { createShellTools as _createShellTools } from './shell-tools.js';
-import { createWriteTools as _createWriteTools } from './write-tools.js';
-import { createDockerTools as _createDockerTools } from './docker-tools.js';
-import type { FactoryContext } from './types.js';
+import { fileTools as _fileTools } from './file-tools';
+import { shellToolMetadata as _shellMeta } from './shell-tools';
+import { writeToolMetadata as _writeMeta } from './write-tools';
+import { dockerToolMetadata as _dockerMeta } from './docker-tools';
+import { lokiTools as _lokiTools } from './loki-tools';
+import { stateTools as _stateTools } from './state-tools';
+import { createShellTools as _createShellTools } from './shell-tools';
+import { createWriteTools as _createWriteTools } from './write-tools';
+import { createDockerTools as _createDockerTools } from './docker-tools';
+import type { FactoryContext } from './types';
 
 /**
  * All standard tools (no HITL required).

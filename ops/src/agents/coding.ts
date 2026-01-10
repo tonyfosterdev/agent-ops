@@ -31,7 +31,7 @@
  * - Context from log_findings should inform investigation
  */
 import { createAgent } from '@inngest/agent-kit';
-import type { FactoryContext } from '../tools/types.js';
+import type { FactoryContext } from '../tools/types';
 import {
   readFileTool,
   searchCodeTool,
@@ -39,7 +39,7 @@ import {
   createWriteFileTool,
   createDockerComposeRestartTool,
   completeTaskTool,
-} from '../tools/index.js';
+} from '../tools/index';
 
 /**
  * Create a coding agent with publish function injected.

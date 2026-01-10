@@ -64,10 +64,10 @@ import { anthropic } from '@inngest/agent-kit';
 import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { trace, SpanStatusCode, type Span } from '@opentelemetry/api';
-import { createCodingAgent, createLogAnalyzer } from './agents/index.js';
-import type { FactoryContext } from './tools/types.js';
-import { config } from './config.js';
-import { historyAdapter, type StoredMessage } from './db/index.js';
+import { createCodingAgent, createLogAnalyzer } from './agents/index';
+import type { FactoryContext } from './tools/types';
+import { config } from './config';
+import { historyAdapter, type StoredMessage } from './db/index';
 
 /**
  * Active agent span tracking.

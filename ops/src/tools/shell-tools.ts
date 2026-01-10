@@ -36,9 +36,9 @@ import { createTool } from '@inngest/agent-kit';
 import { z } from 'zod';
 import { execSync } from 'node:child_process';
 import * as crypto from 'node:crypto';
-import { validateCommand } from './security.js';
-import type { FactoryContext } from './types.js';
-import { createHitlRequestedEvent, createHitlResolvedEvent } from './types.js';
+import { validateCommand } from './security';
+import type { FactoryContext } from './types';
+import { createHitlRequestedEvent, createHitlResolvedEvent } from './types';
 
 /**
  * Result type for HITL tools that require approval.
