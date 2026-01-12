@@ -87,25 +87,35 @@ This document describes the architecture for the OpsAgent system, migrated from 
 
 ### 1. Agent Server
 
-The agent server is built with Hono and uses the AgentKit `createServer()` function:
+The agent server is built with Hono and uses Inngest's `serve()` handler:
 
 ```typescript
-// ops/src/index.ts
-import { createServer } from "@inngest/agent-kit/server";
-import { opsNetwork } from "./network.js";
+// ops/src/server.ts
+import { Hono } from 'hono';
+import { serve as serveInngest } from 'inngest/hono';
+import { inngest } from './inngest';
+import { inngestFunctions } from './inngest/index';
 
-const server = createServer({
-  appId: "ops-agent",
-  networks: [opsNetwork],
+const app = new Hono();
+
+// Inngest serve handler - handles function execution
+app.on(['GET', 'POST', 'PUT'], '/api/inngest', (c) => {
+  const handler = serveInngest({
+    client: inngest,
+    functions: inngestFunctions,
+  });
+  return handler(c);
 });
-
-server.listen(3200);
 ```
 
-**Endpoints Provided by AgentKit**:
-- `POST /` - Start a new agent run
-- `GET /` - Health check
-- Inngest webhook endpoint (internal)
+**Endpoints**:
+- `POST /api/chat` - Send message to trigger agent execution
+- `POST /api/realtime/token` - Get WebSocket subscription token
+- `POST /api/approve-tool` - Approve/deny tool execution
+- `POST /api/threads` - Create conversation thread
+- `GET /api/threads/:threadId/history` - Get thread history
+- `GET /api/inngest` - Inngest webhook endpoint
+- `GET /api/health` - Health check
 
 **Container Configuration**:
 - Port: 3200
@@ -583,27 +593,47 @@ The dashboard receives live updates via Inngest's Realtime infrastructure and th
 | `run.complete` | Network execution finishes | `{}` |
 | `run.error` | Execution failed | `{ error: "message" }` |
 
-### useInngestSubscription Hook
+### useAgents Hook
 
 ```typescript
-import { useInngestSubscription } from '@inngest/realtime/hooks';
+import { useAgents, AgentProvider } from '@inngest/use-agent';
 
-const { data, error, state, latestData, clear } = useInngestSubscription({
-  enabled: !!threadId,
-  refreshToken: () => fetchSubscriptionToken(threadId),
-});
+// Wrap app with AgentProvider
+<AgentProvider
+  userId={userId}
+  transport={{
+    api: {
+      sendMessage: '/api/chat',
+      getRealtimeToken: '/api/realtime/token',
+      approveToolCall: '/api/approve-tool',
+    },
+  }}
+>
+  <Chat />
+</AgentProvider>
+
+// In Chat component
+const {
+  messages,
+  status,
+  sendMessage,
+  approveToolCall,
+  denyToolCall,
+  error,
+} = useAgents({ debug: true });
 ```
 
 **Return Values**:
 | Property | Type | Description |
 |----------|------|-------------|
-| `data` | `Array<Message>` | All messages in chronological order |
-| `latestData` | `Message` | Most recent message |
-| `error` | `Error \| null` | Subscription errors |
-| `state` | `InngestSubscriptionState` | Connection state |
-| `clear` | `() => void` | Clear accumulated data |
+| `messages` | `ConversationMessage[]` | All messages with parts |
+| `status` | `AgentStatus` | Connection/processing status |
+| `sendMessage` | `(msg: string) => void` | Send user message |
+| `approveToolCall` | `(id: string) => void` | Approve HITL tool |
+| `denyToolCall` | `(id: string, reason?: string) => void` | Deny HITL tool |
+| `error` | `Error \| null` | Connection errors |
 
-**Connection States**: `"closed"`, `"connecting"`, `"active"`, `"error"`, `"refresh_token"`, `"closing"`
+**Agent Status**: `"ready"`, `"submitted"`, `"streaming"`, `"error"`
 
 ### Token-based Authentication
 
@@ -932,9 +962,9 @@ const authMiddleware = async (c: Context, next: Next) => {
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| OpsAgent Dashboard | http://localhost:3001 or http://ops.localhost | Submit tasks, approve operations |
-| Agent Server API | http://api.localhost/agents | AgentKit HTTP interface |
-| Inngest Dev UI | http://localhost:8288 | Function debugging, waterfall traces |
+| Agent Dashboard | http://agents.localhost | Submit tasks, approve operations |
+| Agent Server API | http://api.localhost/agents/api | AgentKit HTTP interface |
+| Inngest Dev UI | http://inngest.localhost | Function debugging, waterfall traces |
 | Grafana | http://grafana.localhost | Logs (Loki) and traces (Tempo) |
 | Traefik Dashboard | http://localhost:8080 | Routing inspection |
 
@@ -1071,45 +1101,58 @@ AUTH_PASSWORD=secret
 ```
 ops/
 ├── src/
-│   ├── index.ts              # Entry point, createServer()
-│   ├── network.ts            # Network definition + hybrid router (uses getDefaultRoutingAgent())
+│   ├── server.ts             # Entry point, Hono server + endpoints
+│   ├── inngest.ts            # Inngest client initialization
+│   ├── network.ts            # Network definition + LLM router
 │   ├── config.ts             # Environment configuration
-│   ├── logger.ts             # Pino logger setup
 │   ├── telemetry.ts          # OpenTelemetry setup
 │   ├── agents/
-│   │   ├── log-analyzer.ts   # Log analyzer system prompt
-│   │   └── coding.ts         # Coding agent system prompt
-│   │   # NOTE: No "default.ts" - AgentKit's getDefaultRoutingAgent() handles LLM routing
+│   │   ├── index.ts          # Agent exports
+│   │   ├── log-analyzer.ts   # Log analyzer agent factory
+│   │   └── coding.ts         # Coding agent factory
+│   ├── prompts/
+│   │   ├── index.ts          # Prompt exports
+│   │   ├── codingPrompt.ts   # Coding agent system prompt
+│   │   ├── logAnalyzerPrompt.ts # Log analyzer system prompt
+│   │   └── routerPrompt.ts   # Router classifier prompt
+│   ├── constants/
+│   │   ├── index.ts          # Constants exports
+│   │   └── state-keys.ts     # Network state key constants
+│   ├── inngest/
+│   │   ├── index.ts          # Function exports
+│   │   ├── functions.ts      # agentChat function definition
+│   │   └── realtime.ts       # Channel/topic constants
 │   ├── tools/
 │   │   ├── index.ts          # Tool exports
-│   │   ├── allowlist.ts      # Command allowlist
-│   │   ├── read-file.ts      # Safe: read file
-│   │   ├── write-file.ts     # Dangerous: write file
-│   │   ├── search.ts         # Safe: find_files, search_code
-│   │   ├── shell.ts          # Dangerous: shell_command
-│   │   ├── docker.ts         # Dangerous: restart_service
-│   │   ├── loki.ts           # Safe: loki_query, etc.
-│   │   └── handoff.ts        # Handoff schema (unused in current impl)
-│   ├── db/
-│   │   ├── postgres.ts       # Database connection
-│   │   ├── history-adapter.ts # Thread/message persistence
-│   │   └── schema.sql        # Database schema
-│   └── types/
-│       └── index.ts          # TypeScript type definitions
+│   │   ├── types.ts          # Tool type definitions
+│   │   ├── security.ts       # Command allowlist validation
+│   │   ├── file-tools.ts     # Safe: read_file, find_files, search_code
+│   │   ├── write-tools.ts    # Dangerous: write_file
+│   │   ├── shell-tools.ts    # Dangerous: shell_command_execute
+│   │   ├── docker-tools.ts   # Dangerous: docker_compose_restart
+│   │   ├── loki-tools.ts     # Safe: loki_query, etc.
+│   │   └── state-tools.ts    # report_findings, complete_task
+│   └── db/
+│       ├── index.ts          # Database exports
+│       ├── postgres.ts       # Database connection + schema
+│       └── history-adapter.ts # Thread/message persistence
 ├── dashboard/
 │   ├── src/
 │   │   ├── main.tsx          # React entry point
-│   │   ├── App.tsx           # Main app component
+│   │   ├── App.tsx           # Main app + AgentProvider
 │   │   ├── api/
 │   │   │   └── client.ts     # API client with runtime config
 │   │   ├── hooks/
-│   │   │   ├── useAgentStream.ts  # useInngestSubscription wrapper (STREAMING)
-│   │   │   └── types.ts           # Stream event types
+│   │   │   └── useHitlState.ts # HITL state from streaming events
 │   │   └── components/
-│   │       ├── Chat.tsx          # Main chat interface
+│   │       ├── Chat.tsx          # Main chat interface (useAgents)
 │   │       ├── MessageList.tsx   # Parts-based message rendering
-│   │       └── ToolApproval.tsx  # HITL approval UI
-│   ├── package.json          # Includes @inngest/realtime
+│   │       ├── ToolApproval.tsx  # HITL approval UI
+│   │       └── LoadingSpinner.tsx # Reusable spinner
+│   ├── index.html            # HTML template with config.js
+│   ├── nginx.conf            # Nginx config with API proxy
+│   ├── docker-entrypoint.sh  # Runtime config generation
+│   ├── package.json          # Includes @inngest/use-agent
 │   ├── vite.config.ts
 │   └── Dockerfile
 ├── package.json
