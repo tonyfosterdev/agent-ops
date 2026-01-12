@@ -1,15 +1,17 @@
 # AgentOps - Durable Agent Framework
 
-A durable agent framework with human-in-the-loop approval. Agents can pause for human review, survive server restarts, and maintain full audit trails via event sourcing.
+A durable agent framework built on Inngest AgentKit with human-in-the-loop approval. Agents can pause for human review, survive server restarts via Inngest step functions, and export traces to Tempo via OpenTelemetry.
 
 ## Architecture
 
-This is a **monorepo** with four packages:
+This is a **flattened structure** (not a monorepo):
 
-- **shared**: Common types, base classes, configuration, and utilities
-- **agent-server**: Hono-based HTTP server that runs agents and streams events via SSE
-- **dashboard**: React dashboard for submitting tasks and approving dangerous operations
-- **ops-cli**: Interactive CLI client (legacy, use dashboard for HITL)
+- **src/**: Agent server with Inngest AgentKit
+  - `agents/`: Agent definitions (coding, log-analyzer)
+  - `tools/`: Tool definitions with Zod schemas
+  - `db/`: PostgreSQL connection and history adapter
+  - `inngest/`: Inngest function definitions
+- **dashboard/**: React dashboard with `useAgent` hook for chat UI
 
 ## Quick Start
 
@@ -17,64 +19,49 @@ This is a **monorepo** with four packages:
 
 ```bash
 # Install dependencies
-npm install --legacy-peer-deps
+cd ops && npm install
+cd dashboard && npm install
 
-# Build all packages
-npm run build
-
-# Run server
+# Run server (connects to Inngest Dev Server)
 npm run dev:server
 
 # Run dashboard (in another terminal)
-npm run dev:dashboard
+cd dashboard && npm run dev
 ```
 
 ### Via Docker
 
 ```bash
-docker compose up --build agent-server
+# Start all services including Inngest Dev Server
+docker compose up --build agent-server inngest-dev
 ```
 
-## Usage
+## Key Technologies
 
-### Server API
+- **Inngest AgentKit**: Multi-agent orchestration with durable execution
+- **Inngest Step Functions**: Automatic retry and crash recovery
+- **OpenTelemetry**: Distributed tracing exported to Tempo
+- **PostgreSQL**: Conversation history persistence
+- **Hono**: Lightweight HTTP server
+- **React + useAgent**: Real-time chat UI with HITL approval
 
-```bash
-# Health check
-curl http://localhost:3200/health
+## Environment Variables
 
-# List agents
-curl -u admin:admin123 http://localhost:3200/agents/types
+```env
+# Required
+ANTHROPIC_API_KEY=your-api-key
 
-# Run an agent
-curl -X POST http://localhost:3200/agents/coding/run \
-  -u admin:admin123 \
-  -H "Content-Type: application/json" \
-  -d '{"task": "Fix bugs", "config": {"maxSteps": 10}}'
+# Database (dedicated agent PostgreSQL)
+AGENT_DATABASE_URL=postgres://agentuser:agentpass@agent-db:5432/agent_db
+
+# Inngest
+INNGEST_DEV=1
+INNGEST_DEV_SERVER_URL=http://inngest-dev:8288
+
+# OpenTelemetry
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://tempo:4318/v1/traces
+OTEL_SERVICE_NAME=agentops
 ```
-
-### CLI
-
-```bash
-# Interactive mode
-ops
-
-# Direct command
-ops run "Fix TypeScript errors" --agent coding
-```
-
-## Documentation
-
-See README files in each package:
-- `packages/shared/` - Shared utilities and types
-- `packages/agent-server/` - HTTP server documentation
-- `packages/dashboard/` - React dashboard with approval UI
-
-## Tech Stack
-
-- **Server**: Hono, TypeScript, TypeORM, PostgreSQL
-- **Dashboard**: React, Tailwind CSS, SSE streaming
-- **Infrastructure**: Docker, Traefik, Loki
 
 ## License
 

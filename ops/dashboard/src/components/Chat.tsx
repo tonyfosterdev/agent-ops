@@ -1,0 +1,453 @@
+/**
+ * Chat Component - Main chat interface for AgentOps dashboard.
+ *
+ * This is the primary user interface for interacting with agents.
+ * It combines message display, input handling, and HITL approvals.
+ *
+ * ## Features
+ * - Real-time streaming via @inngest/use-agent
+ * - Message history display with auto-scroll
+ * - Input field with send button
+ * - Loading indicator during agent processing
+ * - Error display with dismiss
+ * - Tool approval integration via approveToolCall/denyToolCall
+ */
+
+import { useState, useRef, useMemo, KeyboardEvent, FormEvent } from 'react';
+import { useAgents, type AgentStatus, type ConversationMessage, type MessagePart } from '@inngest/use-agent';
+import { MessageList } from './MessageList';
+import { LoadingSpinner } from './LoadingSpinner';
+import { useTheme } from '@/App';
+import { useHitlState, type HitlRequest } from '../hooks/useHitlState';
+
+/**
+ * Chat input component with textarea and send button.
+ */
+function ChatInput({
+  onSend,
+  disabled,
+  placeholder = 'Type a message... (Enter to send, Shift+Enter for new line)',
+}: {
+  onSend: (message: string) => void;
+  disabled: boolean;
+  placeholder?: string;
+}) {
+  const [input, setInput] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (input.trim() && !disabled) {
+      onSend(input.trim());
+      setInput('');
+      // Reset textarea height
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+    }
+  };
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Submit on Enter (without Shift)
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  };
+
+  const handleInput = () => {
+    // Auto-resize textarea
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(
+        textareaRef.current.scrollHeight,
+        200
+      )}px`;
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+      <div className="flex gap-2 items-end max-w-4xl mx-auto">
+        <div className="flex flex-1 min-w-0">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onInput={handleInput}
+            placeholder={placeholder}
+            disabled={disabled}
+            rows={1}
+            className="w-full resize-none rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 px-4 py-3 focus:border-indigo-500 dark:focus:border-indigo-400 focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-800 focus:outline-none disabled:bg-gray-50 dark:disabled:bg-gray-800 disabled:text-gray-500 dark:disabled:text-gray-500"
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={disabled || !input.trim()}
+          className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 dark:disabled:bg-indigo-800 text-white rounded-xl w-12 h-12 transition-colors flex items-center justify-center"
+        >
+          {disabled ? (
+            <LoadingSpinner size="md" />
+          ) : (
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+              />
+            </svg>
+          )}
+        </button>
+      </div>
+      <p className="text-xs text-gray-400 dark:text-gray-500 text-center mt-2">
+        Press Enter to send, Shift+Enter for new line
+      </p>
+    </form>
+  );
+}
+
+/**
+ * Error banner component.
+ */
+function ErrorBanner({
+  message,
+  onDismiss,
+}: {
+  message: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="bg-red-50 dark:bg-red-900/30 border-b border-red-200 dark:border-red-800 px-4 py-3">
+      <div className="max-w-4xl mx-auto flex items-center justify-between">
+        <div className="flex items-center gap-2 text-red-700 dark:text-red-400">
+          <svg
+            className="w-5 h-5"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+            />
+          </svg>
+          <span className="text-sm">{message}</span>
+        </div>
+        <button
+          onClick={onDismiss}
+          className="text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+        >
+          <svg
+            className="w-5 h-5"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M6 18L18 6M6 6l12 12"
+            />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Get status indicator color based on agent status.
+ * AgentStatus is: "ready" | "submitted" | "streaming" | "error"
+ */
+function getStatusColor(status: AgentStatus): string {
+  switch (status) {
+    case 'ready':
+      return 'bg-green-500';
+    case 'submitted':
+    case 'streaming':
+      return 'bg-yellow-500 animate-pulse';
+    case 'error':
+      return 'bg-red-500';
+    default:
+      return 'bg-gray-400';
+  }
+}
+
+/**
+ * Get status text based on agent status.
+ */
+function getStatusText(status: AgentStatus): string {
+  switch (status) {
+    case 'ready':
+      return 'Connected';
+    case 'submitted':
+      return 'Submitted...';
+    case 'streaming':
+      return 'Processing...';
+    case 'error':
+      return 'Error';
+    default:
+      return 'Disconnected';
+  }
+}
+
+/**
+ * Theme toggle button component.
+ */
+function ThemeToggle() {
+  const { theme, toggleTheme } = useTheme();
+
+  return (
+    <button
+      onClick={toggleTheme}
+      className="p-2 rounded-lg text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+      aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+    >
+      {theme === 'dark' ? (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+        </svg>
+      ) : (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+/**
+ * Chat header component.
+ */
+function ChatHeader({
+  status,
+  onNewThread,
+}: {
+  status: AgentStatus;
+  onNewThread: () => void;
+}) {
+  return (
+    <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-3">
+      <div className="max-w-4xl mx-auto flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center">
+            <svg
+              className="w-6 h-6 text-white"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+              />
+            </svg>
+          </div>
+          <div>
+            <h1 className="font-semibold text-gray-900 dark:text-gray-100">AgentOps</h1>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                <div className={`w-2 h-2 rounded-full ${getStatusColor(status)}`} />
+                <span className="text-xs text-gray-400 dark:text-gray-500">{getStatusText(status)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <ThemeToggle />
+          <button
+            onClick={onNewThread}
+            className="text-sm text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 font-medium flex items-center gap-1"
+          >
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 4v16m8-8H4"
+              />
+            </svg>
+            New Chat
+          </button>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+export function Chat() {
+  // Initialize HITL state hook - tracks approval requests from streaming events
+  const { hitlRequests, handleEvent } = useHitlState();
+
+  const {
+    messages,
+    status,
+    sendMessage,
+    approveToolCall,
+    denyToolCall,
+    error,
+    clearError,
+  } = useAgents({
+    debug: true,
+    // Pass HITL event handler to intercept hitl.requested/hitl.resolved events
+    onEvent: handleEvent,
+  });
+
+  // Status is: "ready" | "submitted" | "streaming" | "error"
+  const isProcessing = status === 'submitted' || status === 'streaming';
+
+  /**
+   * Merge HITL state into messages for rendering.
+   *
+   * The streaming reducer doesn't handle hitl.requested events, so tool-call parts
+   * show state='input-available' instead of 'awaiting-approval'. This useMemo
+   * patches tool-call parts that have pending HITL requests.
+   *
+   * IMPORTANT: The toolCallId in HITL events (generated by our tool handlers) does NOT
+   * match the toolCallId in ToolCallUIPart (generated by AgentKit's streaming context).
+   * These are independent IDs. We must match by TOOL NAME instead of toolCallId.
+   *
+   * Matching logic:
+   * - For each tool-call part in 'input-available' state, check if there's a pending
+   *   HITL request for the same tool name.
+   * - If so, set state to 'awaiting-approval' and attach the HITL request ID.
+   */
+  const messagesWithHitl = useMemo(() => {
+    // Build a map of tool name -> pending HITL requests
+    const pendingByToolName = new Map<string, HitlRequest>();
+    for (const [, req] of hitlRequests) {
+      if (req.status === 'pending') {
+        pendingByToolName.set(req.toolName, req);
+      }
+    }
+
+    return messages.map((msg) => ({
+      ...msg,
+      parts: msg.parts?.map((part) => {
+        if (part.type === 'tool-call') {
+          // Cast to access toolName and state - we know tool-call parts have these
+          const toolPart = part as MessagePart & {
+            toolCallId: string;
+            toolName: string;
+            state: string;
+          };
+
+          // Only match tool-calls that haven't executed yet (input-available)
+          // and have a pending HITL request for the same tool name
+          if (toolPart.state === 'input-available') {
+            const hitlReq = pendingByToolName.get(toolPart.toolName);
+            if (hitlReq) {
+              // Return a new part with awaiting-approval state
+              // Also attach the HITL requestId for approval/denial
+              return {
+                ...part,
+                state: 'awaiting-approval' as const,
+                // Store the HITL request ID for approval actions
+                hitlRequestId: hitlReq.requestId,
+              };
+            }
+          }
+        }
+        return part;
+      }),
+    })) as ConversationMessage[];
+  }, [messages, hitlRequests]);
+
+  // Check for pending approvals in HITL state (more reliable than checking message parts)
+  const hasPendingApproval = Array.from(hitlRequests.values()).some(
+    (req) => req.status === 'pending'
+  );
+
+  /**
+   * Handle race condition: HITL event may arrive before tool-call part is created.
+   * In this case, we have pending HITL requests but no matching tool-call part.
+   * The WaitingForApprovalIndicator will show, and approval buttons will appear
+   * once the tool-call part is created by a subsequent event.
+   *
+   * We match by tool name since toolCallIds don't match (they're generated independently).
+   */
+  const hasPendingHitlWithoutToolPart = useMemo(() => {
+    if (!hasPendingApproval) return false;
+
+    // Get all tool names that have tool-call parts in 'input-available' state
+    // (these are tools that haven't executed yet and could receive HITL approval)
+    const toolNamesWithParts = new Set<string>();
+    messages.forEach((msg) => {
+      msg.parts?.forEach((part) => {
+        if (part.type === 'tool-call') {
+          const toolPart = part as MessagePart & { toolName: string; state: string };
+          if (toolPart.state === 'input-available') {
+            toolNamesWithParts.add(toolPart.toolName);
+          }
+        }
+      });
+    });
+
+    // Return true if there's a pending HITL for a tool that has no matching part
+    for (const [, req] of hitlRequests) {
+      if (req.status === 'pending' && !toolNamesWithParts.has(req.toolName)) {
+        return true;
+      }
+    }
+    return false;
+  }, [messages, hitlRequests, hasPendingApproval]);
+
+  const handleApprove = (toolCallId: string) => {
+    approveToolCall(toolCallId);
+  };
+
+  const handleDeny = (toolCallId: string, reason: string) => {
+    denyToolCall(toolCallId, reason);
+  };
+
+  const handleNewThread = () => {
+    // Navigate to create a new thread or clear current conversation
+    // The useAgents hook may not have clearMessages - depends on implementation
+    window.location.reload();
+  };
+
+  return (
+    <div className="flex flex-col h-screen bg-gray-50 dark:bg-gray-900">
+      <ChatHeader status={status} onNewThread={handleNewThread} />
+
+      {error && <ErrorBanner message={error.message} onDismiss={clearError} />}
+
+      <div className="flex-1 flex flex-col overflow-hidden max-w-4xl w-full mx-auto">
+        <MessageList
+          messages={messagesWithHitl}
+          isLoading={isProcessing}
+          isWaitingForApproval={hasPendingApproval || hasPendingHitlWithoutToolPart}
+          onApprove={handleApprove}
+          onDeny={handleDeny}
+        />
+      </div>
+
+      <ChatInput
+        onSend={sendMessage}
+        disabled={isProcessing}
+        placeholder={
+          hasPendingApproval
+            ? 'Waiting for your approval above...'
+            : 'Type a message... (Enter to send, Shift+Enter for new line)'
+        }
+      />
+    </div>
+  );
+}

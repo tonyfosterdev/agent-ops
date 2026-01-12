@@ -95,6 +95,7 @@ services:
       POSTGRES_DB: ${OPS_DB_DATABASE:-ops_db}
     volumes:
       - ops-db-data:/var/lib/postgresql/data
+      - ./ops/src/db/schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "5435:5432"
     networks:
@@ -320,31 +321,79 @@ services:
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
     depends_on:
       - loki
+      - tempo
     restart: unless-stopped
 
-  # Agent Server
+  # Tempo - Distributed Tracing
+  tempo:
+    image: grafana/tempo:2.3.1
+    container_name: tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/lib/tempo
+    ports:
+      - "4318:4318"  # OTLP HTTP
+      - "4317:4317"  # OTLP gRPC
+    networks:
+      - agentops-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tempo.rule=Host(`tempo.localhost`)"
+      - "traefik.http.routers.tempo.entrypoints=web"
+      - "traefik.http.services.tempo.loadbalancer.server.port=3200"
+    restart: unless-stopped
+
+  # Inngest Dev Server
+  inngest-dev:
+    image: inngest/inngest:latest
+    container_name: inngest-dev
+    command: ["inngest", "dev", "-u", "http://agent-server:3200/api/inngest"]
+    ports:
+      - "8288:8288"
+    environment:
+      INNGEST_DEV: "1"
+    networks:
+      - agentops-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.inngest.rule=Host(`inngest.localhost`)"
+      - "traefik.http.routers.inngest.entrypoints=web"
+      - "traefik.http.services.inngest.loadbalancer.server.port=8288"
+    restart: unless-stopped
+
+  # Agent Server (Inngest AgentKit)
   agent-server:
     build:
       context: ./ops
-      dockerfile: packages/agent-server/Dockerfile
+      dockerfile: Dockerfile
     container_name: agent-server
-    env_file:
-      - ./ops/packages/agent-server/.env
     environment:
       PORT: 3200
+      HOST: 0.0.0.0
       NODE_ENV: production
-      AUTH_USERNAME: ${AGENT_SERVER_USERNAME:-admin}
-      AUTH_PASSWORD: ${AGENT_SERVER_PASSWORD}
       WORK_DIR: /workspace
-      COMPOSE_PROJECT_NAME: agentops
-      LOG_LEVEL: info
-      LOKI_URL: http://loki:3100
+      # Anthropic API
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # Inngest Configuration
+      INNGEST_DEV: "true"
+      INNGEST_DEV_SERVER_URL: http://inngest-dev:8288
+      INNGEST_BASE_URL: http://inngest-dev:8288
       # Ops Database
       OPS_DB_HOST: ops-db
       OPS_DB_PORT: 5432
       OPS_DB_USERNAME: ${OPS_DB_USERNAME:-opsuser}
       OPS_DB_PASSWORD: ${OPS_DB_PASSWORD:-opspassword}
       OPS_DB_DATABASE: ${OPS_DB_DATABASE:-ops_db}
+      # OpenTelemetry
+      OTEL_ENABLED: "true"
+      OTEL_SERVICE_NAME: agentops
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+      # External Services
+      LOKI_URL: http://loki:3100
+      STORE_API_URL: http://store-api:3000
+      WAREHOUSE_ALPHA_URL: http://warehouse-alpha:3000
+      WAREHOUSE_BETA_URL: http://warehouse-beta:3000
     ports:
       - "3200:3200"
     volumes:
@@ -353,13 +402,41 @@ services:
     networks:
       - agentops-network
     depends_on:
-      - loki
-      - ops-db
+      loki:
+        condition: service_started
+      ops-db:
+        condition: service_healthy
+      inngest-dev:
+        condition: service_started
+      tempo:
+        condition: service_started
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.agent-server.rule=Host(`api.localhost`) && PathPrefix(`/agents`)"
       - "traefik.http.routers.agent-server.entrypoints=web"
+      - "traefik.http.middlewares.agents-strip.stripprefix.prefixes=/agents"
+      - "traefik.http.routers.agent-server.middlewares=agents-strip"
       - "traefik.http.services.agent-server.loadbalancer.server.port=3200"
+    restart: unless-stopped
+
+  # Agent Dashboard
+  agent-dashboard:
+    build:
+      context: ./ops/dashboard
+      dockerfile: Dockerfile
+    container_name: agent-dashboard
+    environment:
+      VITE_API_URL: http://api.localhost/agents/api
+      VITE_INNGEST_DEV_URL: http://inngest.localhost
+    networks:
+      - agentops-network
+    depends_on:
+      - agent-server
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.agent-dashboard.rule=Host(`agents.localhost`)"
+      - "traefik.http.routers.agent-dashboard.entrypoints=web"
+      - "traefik.http.services.agent-dashboard.loadbalancer.server.port=80"
     restart: unless-stopped
 
 volumes:
@@ -369,3 +446,4 @@ volumes:
   ops-db-data:
   loki-data:
   grafana-data:
+  tempo-data:

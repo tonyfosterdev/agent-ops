@@ -1,13 +1,15 @@
 # Dependencies
 node_modules/
 package-lock.json
-yarn.lock
 
 # Build output
 dist/
+dashboard/dist/
 
 # Environment variables
 .env
+.env.local
+.env.*.local
 
 # Logs
 logs/
@@ -28,9 +30,7 @@ Thumbs.db
 coverage/
 .nyc_output/
 *.lcov
-packages/*/dist
-packages/*/node_modules
+
+# Config
 .ops/
-*.log
-.env
 .ops-config.json

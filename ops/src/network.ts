@@ -1,0 +1,575 @@
+/**
+ * Agent Network Factory with LLM-Only Router for AgentOps.
+ *
+ * Creates the AgentKit network that orchestrates multiple agents for
+ * operations tasks. The network uses LLM classification for all initial
+ * routing decisions to ensure correctness.
+ *
+ * ## Factory Pattern
+ *
+ * The network is created via factory function to inject the publish function
+ * into agents that use dangerous tools requiring HITL approval:
+ *
+ * ```typescript
+ * const network = createAgentNetwork({ publish });
+ * ```
+ *
+ * ## Routing Priority
+ *
+ * 1. Completion check - Stop if work is done
+ * 2. User confirmed handoff - User said "yes" to a handoff suggestion
+ * 3. Agent-requested handoff - Explicit delegation via state
+ * 4. Sticky behavior - Keep current agent running
+ * 5. LLM classification - Route based on intent analysis
+ *
+ * ## Design Decision
+ *
+ * We use LLM-only routing (no keyword matching) because:
+ * - Keyword matching has false positives (e.g., "fix the" in "I got an error trying to fix the code")
+ * - LLM understands context and nuance that keywords cannot
+ * - Correctness is prioritized over latency
+ * - Future optimization: add keyword caching for proven patterns if needed
+ *
+ * ## Agents
+ *
+ * - codingAgent: Code analysis, debugging, and repairs
+ * - logAnalyzer: Log parsing, pattern detection, and diagnostics
+ *
+ * ## State Communication
+ *
+ * Agents communicate via network.state.kv:
+ * - `log_findings`: Findings from log analysis (set by logAnalyzer)
+ * - `route_to`: Explicit handoff request (consumed and cleared by router)
+ * - `complete`: Set to true when work is done (network stops)
+ * - `runId`: Inngest run ID for HITL event correlation
+ * - `threadId`: Thread ID for history persistence
+ * - `userId`: User ID for thread ownership
+ * - `handoff_suggested`: Agent suggested handoff, awaiting user confirmation
+ * - `needs_clarification`: Router flagged ambiguous input, agent should ask
+ *
+ * ## History Integration
+ *
+ * The network uses AgentKit's HistoryConfig for automatic persistence:
+ * - createThread: Creates/ensures thread exists (supports client-generated IDs)
+ * - get: Loads conversation history from database
+ * - appendUserMessage: Saves user message at start of run
+ * - appendResults: Saves agent results after run completes
+ *
+ * History is managed entirely by the network - callers just need to provide
+ * userId and optionally threadId in the state.
+ */
+
+import { createNetwork, AgentResult } from '@inngest/agent-kit';
+import { anthropic } from '@inngest/agent-kit';
+import Anthropic from '@anthropic-ai/sdk';
+import { z } from 'zod';
+import { trace, SpanStatusCode, type Span } from '@opentelemetry/api';
+import { createCodingAgent, createLogAnalyzer } from './agents/index';
+import type { FactoryContext } from './tools/types';
+import { config } from './config';
+import { historyAdapter, type StoredMessage } from './db/index';
+import { ROUTER_SYSTEM_PROMPT } from './prompts/index';
+import { STATE_KEYS } from './constants/index';
+
+/**
+ * Active agent span tracking.
+ * Maps threadId to the currently active agent span.
+ * Used to track agent execution duration across router calls.
+ */
+const activeAgentSpans = new Map<string, Span>();
+
+/**
+ * End the active agent span for a thread if one exists.
+ * Called when switching agents or completing the network run.
+ */
+function endActiveAgentSpan(threadId: string, status: 'ok' | 'error' = 'ok'): void {
+  const span = activeAgentSpans.get(threadId);
+  if (span) {
+    span.setStatus({ code: status === 'ok' ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+    span.end();
+    activeAgentSpans.delete(threadId);
+  }
+}
+
+/**
+ * Start a new agent execution span.
+ * Ends any existing span for the thread first.
+ */
+function startAgentSpan(threadId: string, agentName: string, routingReason?: string): void {
+  // End previous agent span if any
+  endActiveAgentSpan(threadId);
+
+  // Start new span for this agent
+  const span = tracer.startSpan(`agentkit.agent.${agentName}`, {
+    attributes: {
+      'agentkit.agent.name': agentName,
+      'agentkit.thread_id': threadId,
+      'agentkit.routing.reason': routingReason || 'unknown',
+    },
+  });
+
+  activeAgentSpans.set(threadId, span);
+}
+
+/**
+ * OpenTelemetry tracer for router operations.
+ * Used to create custom spans for LLM routing decisions.
+ */
+const tracer = trace.getTracer('agentkit');
+
+/**
+ * Lazy-initialized Anthropic client for router LLM calls.
+ * Uses the same API key as the main agent network.
+ */
+let routerClient: Anthropic | null = null;
+
+function getRouterClient(): Anthropic {
+  if (!routerClient) {
+    routerClient = new Anthropic({
+      apiKey: config.anthropic.apiKey,
+    });
+  }
+  return routerClient;
+}
+
+/**
+ * Configurable confidence threshold for LLM routing decisions.
+ * Below this threshold, the router will ask for clarification.
+ */
+const ROUTING_CONFIDENCE_THRESHOLD = parseFloat(process.env.ROUTING_CONFIDENCE_THRESHOLD ?? '0.7');
+
+/**
+ * Convert stored messages to AgentResult[] format for AgentKit history.
+ *
+ * Includes both user and assistant/tool messages to preserve full conversation
+ * context. User messages are represented as AgentResult objects with 'user' role
+ * output so the LLM can see the complete conversation flow.
+ */
+function convertToAgentResults(messages: StoredMessage[]): AgentResult[] {
+  const results: AgentResult[] = [];
+
+  for (const msg of messages) {
+    // Include user messages as AgentResult with user-role output
+    // This preserves conversation context so the LLM knows what the user asked
+    if (msg.role === 'user') {
+      const userMessage = {
+        type: 'text' as const,
+        role: 'user' as const,
+        content: typeof msg.content === 'string'
+          ? msg.content
+          : JSON.stringify(msg.content),
+      };
+
+      results.push(
+        new AgentResult(
+          'user',
+          [userMessage],
+          [],
+          msg.createdAt,
+          undefined,
+          undefined,
+          undefined,
+          msg.id
+        )
+      );
+      continue;
+    }
+
+    // Create an AgentResult for each assistant/tool message
+    // In the future, we could group consecutive messages from the same agent
+    if (msg.role === 'assistant' || msg.role === 'tool') {
+      const output =
+        typeof msg.content === 'string'
+          ? [{ type: 'text' as const, role: 'assistant' as const, content: msg.content }]
+          : Array.isArray(msg.content)
+            ? msg.content
+            : [{ type: 'text' as const, role: 'assistant' as const, content: JSON.stringify(msg.content) }];
+
+      results.push(
+        new AgentResult(
+          msg.agentName || 'unknown',
+          output,
+          [], // toolCalls - could be populated from tool messages
+          msg.createdAt,
+          undefined, // prompt
+          undefined, // history
+          undefined, // raw
+          msg.id // id
+        )
+      );
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Schema for LLM routing decisions.
+ */
+const routingDecisionSchema = z.object({
+  agent: z.enum(['log-analyzer', 'coding', 'unclear']),
+  confidence: z.number().min(0).max(1),
+  reason: z.string(),
+});
+
+type RoutingDecision = z.infer<typeof routingDecisionSchema>;
+
+/**
+ * Check if user is confirming a handoff suggestion.
+ *
+ * Detects affirmative responses like "yes", "ok", "sure", etc.
+ * Uses strict matching to avoid false positives on phrases
+ * that just happen to start with these words.
+ */
+function userConfirmsHandoff(input: string): boolean {
+  const confirmations = [
+    'yes',
+    'yeah',
+    'yep',
+    'ok',
+    'okay',
+    'sure',
+    'go ahead',
+    'do it',
+    'proceed',
+    'yes please',
+    'please do',
+    'please proceed',
+    'sounds good',
+    "let's do it",
+  ];
+  const lower = input.toLowerCase().trim();
+
+  // Check for exact match or match at start of sentence
+  return confirmations.some(
+    (c) => lower === c || lower.startsWith(c + ' ') || lower.startsWith(c + ',') || lower.startsWith(c + '.')
+  );
+}
+
+/**
+ * Classify user intent using LLM for ambiguous cases.
+ *
+ * Uses structured messages to prevent prompt injection and
+ * validates response with Zod schema. Falls back to log-analyzer
+ * on any errors for safety (read-only operations).
+ *
+ * Uses a small, fast model (claude-3.5-haiku) for quick routing decisions.
+ *
+ * @param input - The current user message
+ * @param recentHistory - Optional recent conversation history for context
+ */
+async function classifyIntentWithLLM(
+  input: string,
+  recentHistory?: Array<{ role: string; content: string; agentName?: string }>
+): Promise<RoutingDecision> {
+  return tracer.startActiveSpan(
+    'agentkit.router.classify',
+    {
+      attributes: {
+        'agentkit.router.input_length': input.length,
+        'agentkit.router.has_history': !!recentHistory && recentHistory.length > 0,
+        'agentkit.router.history_count': recentHistory?.length ?? 0,
+      },
+    },
+    async (span): Promise<RoutingDecision> => {
+      try {
+        const client = getRouterClient();
+
+        // Build context from recent history if available
+        let historyContext = '';
+        if (recentHistory && recentHistory.length > 0) {
+          const historyLines = recentHistory.slice(-4).map((msg) => {
+            const prefix = msg.role === 'user' ? 'User' : `Agent (${msg.agentName || 'unknown'})`;
+            // Truncate long messages
+            const content = typeof msg.content === 'string'
+              ? msg.content.slice(0, 200)
+              : JSON.stringify(msg.content).slice(0, 200);
+            return `${prefix}: ${content}`;
+          });
+          historyContext = `\n\nRecent conversation context:\n${historyLines.join('\n')}\n\nCurrent message to classify:`;
+        }
+
+        // Use structured messages to prevent prompt injection
+        const response = await client.messages.create({
+          model: 'claude-3-5-haiku-20241022',
+          max_tokens: 150,
+          system: ROUTER_SYSTEM_PROMPT,
+          messages: [
+            {
+              role: 'user',
+              content: historyContext + input,
+            },
+          ],
+        });
+
+        // Extract text content from response
+        const textContent = response.content
+          .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+          .map((block) => block.text)
+          .join('');
+
+        // Parse JSON from response
+        const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          console.warn('[router] Could not extract JSON from LLM response:', textContent);
+          span.setAttributes({
+            'agentkit.router.agent': 'log-analyzer',
+            'agentkit.router.confidence': 0.5,
+            'agentkit.router.fallback_reason': 'parse_error',
+          });
+          span.setStatus({ code: SpanStatusCode.OK });
+          span.end();
+          return { agent: 'log-analyzer', confidence: 0.5, reason: 'parse_error_fallback' };
+        }
+
+        const parsed = routingDecisionSchema.safeParse(JSON.parse(jsonMatch[0]));
+        if (!parsed.success) {
+          console.warn('[router] Invalid LLM response schema:', parsed.error.message);
+          span.setAttributes({
+            'agentkit.router.agent': 'log-analyzer',
+            'agentkit.router.confidence': 0.5,
+            'agentkit.router.fallback_reason': 'schema_error',
+          });
+          span.setStatus({ code: SpanStatusCode.OK });
+          span.end();
+          return { agent: 'log-analyzer', confidence: 0.5, reason: 'schema_error_fallback' };
+        }
+
+        // Record successful routing decision
+        span.setAttributes({
+          'agentkit.router.agent': parsed.data.agent,
+          'agentkit.router.confidence': parsed.data.confidence,
+          'agentkit.router.reason': parsed.data.reason,
+        });
+        span.setStatus({ code: SpanStatusCode.OK });
+        span.end();
+        return parsed.data;
+      } catch (error) {
+        console.error('[router] LLM classification failed:', error);
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        span.recordException(error as Error);
+        span.end();
+        return { agent: 'log-analyzer', confidence: 0.5, reason: 'api_error_fallback' };
+      }
+    }
+  );
+}
+
+/**
+ * Create the agent network with publish function injected.
+ *
+ * The publish function is passed to agents that use dangerous tools,
+ * enabling them to emit hitl.requested events for the dashboard.
+ *
+ * @param context - Factory context with publish function
+ * @returns Configured agent network
+ */
+export function createAgentNetwork({ publish }: FactoryContext) {
+  // Create agents with publish function injected
+  const codingAgent = createCodingAgent({ publish });
+  const logAnalyzer = createLogAnalyzer({ publish });
+
+  return createNetwork({
+    name: 'ops-network',
+    agents: [codingAgent, logAnalyzer],
+    defaultModel: anthropic({
+      model: 'claude-sonnet-4-20250514',
+      defaultParameters: {
+        max_tokens: 4096,
+      },
+    }),
+
+    // Limit iterations to prevent runaway execution
+    maxIter: 5,
+
+    /**
+     * History configuration for thread and message persistence.
+     *
+     * Uses client-authoritative threadIds - if the client provides a threadId,
+     * we ensure the thread exists. Otherwise, we create a new one.
+     */
+    history: {
+      /**
+       * Create or ensure thread exists when needed.
+       * Supports both server-generated and client-generated threadIds.
+       */
+      createThread: async ({ state }) => {
+        const userId = state.kv.get(STATE_KEYS.USER_ID) as string;
+        const clientThreadId = state.kv.get(STATE_KEYS.THREAD_ID) as string | undefined;
+
+        if (clientThreadId) {
+          // Client-authoritative: ensure thread exists with client-provided ID
+          await historyAdapter.ensureThread(clientThreadId, userId);
+          return { threadId: clientThreadId };
+        }
+
+        // Server-authoritative: create new thread
+        const threadId = await historyAdapter.createThread(userId);
+        return { threadId };
+      },
+
+      /**
+       * Load conversation history from database.
+       * Verifies thread ownership before returning messages.
+       */
+      get: async ({ threadId, state }) => {
+        if (!threadId) return [];
+
+        // Verify thread ownership
+        const userId = state.kv.get(STATE_KEYS.USER_ID) as string;
+        const thread = await historyAdapter.getThread(threadId);
+        if (!thread) {
+          console.warn(`[history] Thread ${threadId} not found`);
+          return [];
+        }
+        if (thread.userId !== userId) {
+          console.error(`[history] Unauthorized: User ${userId} cannot access thread ${threadId}`);
+          throw new Error(`Unauthorized access to thread ${threadId}`);
+        }
+
+        const messages = await historyAdapter.get(threadId);
+        return convertToAgentResults(messages);
+      },
+
+      /**
+       * Save user message immediately at start of run.
+       */
+      appendUserMessage: async ({ threadId, userMessage }) => {
+        if (!threadId) return;
+        await historyAdapter.appendMessage(threadId, 'user', userMessage.content);
+      },
+
+      /**
+       * Save agent results after run completes.
+       */
+      appendResults: async ({ threadId, newResults }) => {
+        if (!threadId) return;
+        const messages = newResults.flatMap((result) =>
+          result.output.map((output) => ({
+            role: 'assistant' as const,
+            content: output,
+            agentName: result.agentName,
+          }))
+        );
+        await historyAdapter.appendResults(threadId, messages);
+      },
+    },
+
+    /**
+     * LLM-only router for intent classification.
+     *
+     * Routing priority:
+     * 1. Completion check - Stop if work is done
+     * 2. User confirmed handoff - User said "yes" to a handoff suggestion
+     * 3. Agent-requested handoff - Explicit delegation via state
+     * 4. Sticky behavior - Keep current agent running
+     * 5. LLM classification - Route based on intent analysis
+     */
+    router: async ({ network, input, lastResult }) => {
+      const state = network.state.kv;
+      const threadId = (state.get(STATE_KEYS.THREAD_ID) as string) || 'unknown';
+
+      // Priority 1: Check if work is complete - return undefined to stop the network
+      if (state.get(STATE_KEYS.COMPLETE)) {
+        console.log('[router] Task complete, stopping network');
+        endActiveAgentSpan(threadId); // End any active agent span
+        state.delete(STATE_KEYS.CURRENT_AGENT);
+        return undefined;
+      }
+
+      // Loop detection: Track iterations without progress
+      // If agent hasn't called complete_task for 3 iterations, force completion
+      const iterWithoutProgress = (state.get(STATE_KEYS.ITER_WITHOUT_PROGRESS) as number) || 0;
+
+      if (iterWithoutProgress >= 3) {
+        console.warn('[router] Loop detected: forcing completion after', iterWithoutProgress, 'iterations without progress');
+        endActiveAgentSpan(threadId, 'error'); // End with error status
+        state.set(STATE_KEYS.COMPLETE, true);
+        state.set(STATE_KEYS.COMPLETION_TYPE, 'forced_loop_detection');
+        state.set(STATE_KEYS.TASK_SUMMARY, {
+          summary: 'Task was terminated after 3 iterations without progress. The agent may not have finished its work.',
+          success: false,
+          details: { reason: 'loop_detected', iterations: iterWithoutProgress },
+        });
+        state.delete(STATE_KEYS.CURRENT_AGENT);
+        return undefined;
+      }
+
+      state.set(STATE_KEYS.ITER_WITHOUT_PROGRESS, iterWithoutProgress + 1);
+
+      // Priority 2: User confirmed handoff from previous suggestion
+      const handoffSuggested = state.get(STATE_KEYS.HANDOFF_SUGGESTED) as string | undefined;
+      if (handoffSuggested && userConfirmsHandoff(input)) {
+        state.delete(STATE_KEYS.HANDOFF_SUGGESTED);
+        state.set(STATE_KEYS.CURRENT_AGENT, handoffSuggested);
+        console.log('[router] User confirmed handoff to:', handoffSuggested);
+        startAgentSpan(threadId, handoffSuggested, 'user_confirmed_handoff');
+        return handoffSuggested === 'coding' ? codingAgent : logAnalyzer;
+      }
+      // Clear stale handoff suggestion if user didn't confirm
+      if (handoffSuggested) {
+        state.delete(STATE_KEYS.HANDOFF_SUGGESTED);
+      }
+
+      // Priority 3: Check if an agent explicitly requested a handoff via state
+      const nextAgent = state.get(STATE_KEYS.ROUTE_TO) as string | undefined;
+      if (nextAgent) {
+        state.delete(STATE_KEYS.ROUTE_TO);
+        state.set(STATE_KEYS.CURRENT_AGENT, nextAgent);
+        console.log('[router] Agent requested handoff to:', nextAgent);
+        startAgentSpan(threadId, nextAgent, 'agent_requested_handoff');
+        return nextAgent === 'coding' ? codingAgent : logAnalyzer;
+      }
+
+      // Priority 4: Sticky behavior - if an agent is already running, keep using it
+      // Note: Don't start a new span here - the agent is already running with an active span
+      const currentAgent = state.get(STATE_KEYS.CURRENT_AGENT) as string | undefined;
+      if (currentAgent && lastResult) {
+        console.log('[router] Sticky: continuing with', currentAgent);
+        return currentAgent === 'coding' ? codingAgent : logAnalyzer;
+      }
+
+      // Priority 5: LLM classification for all initial routing
+      console.log('[router] Classifying intent with LLM');
+
+      // Get recent history for context-aware routing
+      let recentHistory: Array<{ role: string; content: string; agentName?: string }> | undefined;
+      const threadIdForHistory = state.get(STATE_KEYS.THREAD_ID) as string | undefined;
+      if (threadIdForHistory) {
+        try {
+          const messages = await historyAdapter.getRecentMessages(threadIdForHistory, 4);
+          recentHistory = messages.map((msg) => ({
+            role: msg.role,
+            content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+            agentName: msg.agentName || undefined,
+          }));
+        } catch (err) {
+          console.warn('[router] Failed to load history for routing:', err);
+        }
+      }
+
+      const routingDecision = await classifyIntentWithLLM(input, recentHistory);
+      console.log('[router] LLM decision:', JSON.stringify(routingDecision));
+
+      // Handle low confidence or unclear intent
+      if (routingDecision.agent === 'unclear' || routingDecision.confidence < ROUTING_CONFIDENCE_THRESHOLD) {
+        console.log('[router] Low confidence, requesting clarification');
+        state.set(STATE_KEYS.NEEDS_CLARIFICATION, true);
+        state.set(STATE_KEYS.CURRENT_AGENT, 'log-analyzer'); // Default to read-only agent
+        startAgentSpan(threadId, 'log-analyzer', `low_confidence: ${routingDecision.reason}`);
+        return logAnalyzer;
+      }
+
+      state.set(STATE_KEYS.CURRENT_AGENT, routingDecision.agent);
+      startAgentSpan(threadId, routingDecision.agent, routingDecision.reason);
+      return routingDecision.agent === 'coding' ? codingAgent : logAnalyzer;
+    },
+  });
+}
+
+/**
+ * Export function to end agent spans from external code (e.g., functions.ts)
+ * Called when the network run completes.
+ */
+export { endActiveAgentSpan };
+

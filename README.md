@@ -1,8 +1,8 @@
 # AgentOps
 
-![AgentOps Dashboard](./docs/assets/dashboard-demo.gif)
+![AgentOps Dashboard](./docs/assets/inngest-dashboard-headline.png)
 
-**A proof-of-concept agent framework demonstrating durable AI agents with human-in-the-loop approval.**
+**A proof-of-concept agent framework demonstrating durable AI agents with human-in-the-loop approval, built on Inngest AgentKit.**
 
 This repository showcases architectural patterns for building autonomous agent systems that can pause for human approval and resume after server restarts. It's intended as a reference implementation and learning resource, not a production deployment.
 
@@ -11,29 +11,31 @@ This repository showcases architectural patterns for building autonomous agent s
 This project illustrates key patterns for durable agent systems:
 
 - **Human-in-the-Loop (HITL)** - Dangerous operations pause for human approval before executing
-- **Event Sourcing** - All agent state derived from an append-only journal for crash recovery
-- **Multi-agent Orchestration** - Route tasks to specialized agents based on capabilities
-- **Real-time Dashboard** - Watch agent progress and approve actions via web UI
+- **Durable Execution** - Inngest step functions provide automatic crash recovery
+- **Multi-agent Orchestration** - LLM-based routing between specialized agents
+- **Real-time Streaming** - Watch agent progress via WebSocket with `@inngest/use-agent`
+- **Distributed Tracing** - OpenTelemetry integration with Tempo for observability
 
-See [AGENT_ARCHITECTURE.md](./AGENT_ARCHITECTURE.md) for detailed architecture and patterns.
+See [docs/AGENT_ARCHITECTURE.md](./docs/AGENT_ARCHITECTURE.md) for detailed architecture and patterns.
 
 ## Core Technologies
 
 **Agent Framework**:
-- [Vercel AI SDK](https://sdk.vercel.ai/) - LLM orchestration with tool calling
+- [Inngest AgentKit](https://github.com/inngest/agent-kit) - Durable agent orchestration with step functions
 - [Hono](https://hono.dev/) - Lightweight HTTP server
-- [TypeORM](https://typeorm.io/) - Database ORM for journal persistence
+- [Anthropic Claude](https://anthropic.com/) - LLM for agent reasoning and routing
 - [Zod](https://zod.dev/) - Schema validation
 
 **Dashboard**:
 - [React](https://react.dev/) - UI framework
+- [@inngest/use-agent](https://www.npmjs.com/package/@inngest/use-agent) - Real-time streaming hook
 - [Tailwind CSS](https://tailwindcss.com/) - Styling
-- Server-Sent Events - Real-time event streaming
 
 **Infrastructure**:
 - Docker Compose - Service orchestration
-- PostgreSQL - Journal persistence
+- PostgreSQL - Conversation history persistence
 - Loki + Grafana - Log aggregation and visualization
+- Tempo - Distributed tracing
 - Traefik - Reverse proxy
 
 ## Sample Application
@@ -64,16 +66,14 @@ See [BOOKSTORE_ARCHITECTURE.md](./BOOKSTORE_ARCHITECTURE.md) for details.
 git clone https://github.com/yourusername/agentops.git
 cd agentops
 
-# Create environment files
+# Create environment file
 cp .env.example .env
-cp ops/packages/agent-server/.env.example ops/packages/agent-server/.env
 
-# Edit .env files and set your Anthropic API key
-nano ops/packages/agent-server/.env  # Set ANTHROPIC_API_KEY=sk-ant-...
-nano .env                            # Review and adjust if needed
+# Edit .env and set your Anthropic API key
+nano .env  # Set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-See comments in `.env` files for variable descriptions.
+See comments in `.env.example` for variable descriptions.
 
 ### Start Services
 
@@ -93,7 +93,7 @@ docker compose up --build
 
 ### Access the Dashboard
 
-Open http://localhost:3001 in your browser.
+Open http://agents.localhost in your browser.
 
 1. Enter a task (e.g., "The store-api is returning 500 errors. Fix it.")
 2. Watch the agent investigate and propose solutions
@@ -103,15 +103,15 @@ Open http://localhost:3001 in your browser.
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| Agent Dashboard | http://localhost:3001 | Agent UI with approval flow |
+| Agent Dashboard | http://agents.localhost | Agent UI with approval flow |
+| Inngest Dev UI | http://inngest.localhost | Function debugging, traces |
 | Bookstore UI | http://localhost | Customer/admin interface |
 | Store API | http://api.localhost/store | Orders and catalog |
 | Warehouse Alpha | http://api.localhost/warehouses/alpha | Fulfillment |
 | Warehouse Beta | http://api.localhost/warehouses/beta | Fulfillment |
-| Grafana (Logs) | http://grafana.localhost | Log visualization |
-| Loki | http://loki.localhost | Log aggregation |
+| Grafana | http://grafana.localhost | Logs (Loki) and traces (Tempo) |
 | Traefik Dashboard | http://localhost:8080 | Routing and services |
-| Agent Server API | http://api.localhost/agents | Agent HTTP API |
+| Agent Server API | http://api.localhost/agents/api | Agent HTTP API |
 
 **Test Credentials**:
 - Customer: `alice@customer.com:alice123`
@@ -137,12 +137,15 @@ Open http://localhost:3001 in your browser.
 
 ```
 agentops/
-├── ops/                           # Agent framework (monorepo)
-│   ├── packages/
-│   │   ├── agent-server/          # Hono HTTP server + agents
-│   │   ├── dashboard/             # React dashboard with approval UI
-│   │   └── shared/                # Common types and utilities
-│   └── test-cases/                # Sample code for testing agents
+├── ops/                           # Agent framework
+│   ├── src/                       # Agent server source
+│   │   ├── server.ts              # Hono HTTP server
+│   │   ├── network.ts             # AgentKit network + router
+│   │   ├── agents/                # Agent definitions
+│   │   ├── tools/                 # Tool implementations
+│   │   ├── prompts/               # System prompts
+│   │   └── db/                    # History persistence
+│   └── dashboard/                 # React dashboard with approval UI
 ├── services/                      # Bookstore microservices
 │   ├── store-api/                 # Store backend (TypeScript + Koa)
 │   ├── warehouse-api/             # Warehouse backend (TypeScript + Koa)
@@ -150,17 +153,19 @@ agentops/
 ├── infra/                         # Infrastructure configs
 │   ├── traefik/                   # Reverse proxy
 │   ├── loki/                      # Log aggregation
-│   └── grafana/                   # Log visualization
-├── AGENT_ARCHITECTURE.md          # Agent framework details
+│   ├── grafana/                   # Dashboards + datasources
+│   └── tempo/                     # Distributed tracing
+├── docs/                          # Documentation
+│   ├── AGENT_ARCHITECTURE.md      # Agent framework details
+│   └── assets/                    # Screenshots and diagrams
 ├── BOOKSTORE_ARCHITECTURE.md      # Sample app architecture
 └── docker-compose.yaml            # Service orchestration
 ```
 
 ## Documentation
 
-- **[Agent Architecture](./AGENT_ARCHITECTURE.md)** - Framework design, patterns, and extensibility
+- **[Agent Architecture](./docs/AGENT_ARCHITECTURE.md)** - Framework design, patterns, and extensibility
 - **[Bookstore Architecture](./BOOKSTORE_ARCHITECTURE.md)** - Sample application details
-- **[User Guide](./docs/USER_GUIDE.md)** - Using the bookstore application
 - **[Logging Guide](./docs/LOGGING.md)** - Log aggregation with Loki and Grafana
 
 ## Development
@@ -170,9 +175,9 @@ agentops/
 ```bash
 cd ops
 npm install              # Install dependencies
-npm run build            # Build all packages
+npm run build            # Build TypeScript
 npm run dev:server       # Run agent server (port 3200)
-npm run dev:dashboard    # Run dashboard (port 3001)
+npm run dev:dashboard    # Run dashboard (port 5173)
 ```
 
 ### Bookstore Development
@@ -192,14 +197,13 @@ docker compose logs -f store-api
 
 This is a reference implementation for learning and experimentation. It is **not intended for production use** and lacks:
 
-- **Security hardening** - No HTTPS, uses basic auth, shared secrets in env vars
-- **Error recovery** - Limited retry logic and failure handling
+- **Security hardening** - No HTTPS, no authentication on dashboard
+- **Production Inngest** - Uses Inngest dev server (production requires Inngest Cloud)
 - **Scalability** - Single-instance services, no horizontal scaling
-- **Monitoring** - Basic logging only, no metrics or alerting
 - **Testing** - Minimal test coverage
-- **Authentication** - Simple auth suitable for demos only
+- **Run history UI** - Historical run queries require Inngest dev UI or database access
 
-If adapting this for real-world use, implement proper security, observability, and reliability patterns.
+If adapting this for real-world use, implement proper security, use Inngest Cloud, and add monitoring.
 
 ## License
 
