@@ -3,7 +3,7 @@
 # This runs at container startup, allowing runtime configuration of the SPA
 
 # Default values if not provided
-API_URL="${VITE_API_URL:-http://api.localhost/agents}"
+API_URL="${VITE_API_URL:-http://api.localhost/agents/api}"
 INNGEST_DEV_URL="${VITE_INNGEST_DEV_URL:-http://inngest.localhost}"
 
 # Generate the runtime config file
